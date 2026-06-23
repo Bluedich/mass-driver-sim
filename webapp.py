@@ -221,7 +221,7 @@ app.layout = html.Div(
             "hs-overlay hidden size-full fixed top-0 start-0 z-[80] "
             "overflow-x-hidden overflow-y-auto pointer-events-none"
         ),
-        **{"role": "dialog", "aria-labelledby": "help-modal-label", "tabindex": "-1"},
+        **{"role": "dialog", "aria-labelledby": "help-modal-label", "tabIndex": "-1"},
         children=html.Div(
             className=(
                 "hs-overlay-open:mt-7 hs-overlay-open:opacity-100 "

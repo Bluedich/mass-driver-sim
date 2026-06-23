@@ -105,6 +105,11 @@ _DEST = None   # set in each worker process by _pool_init
 def _pool_init(destination):
     global _DEST
     _DEST = destination
+    # Prevent OpenBLAS/MKL from spawning per-worker thread teams; each worker
+    # runs one propagation at a time so extra threads only waste memory.
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
 
 
 def _prop_worker(args):
@@ -151,7 +156,9 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     if n_workers is None:
-        n_workers = os.cpu_count() or 4
+        # Use at most half the logical cores; spawning too many scipy/OpenBLAS
+        # processes exhausts memory before the work is done.
+        n_workers = max(1, (os.cpu_count() or 4) // 2)
 
     pairs        = [(lat, lon) for lat in lats for lon in lons]
     n            = len(pairs)
