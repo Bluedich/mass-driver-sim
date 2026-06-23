@@ -12,4 +12,4 @@ echo Installing / updating dependencies...
 pip install -q -r requirements.txt
 
 echo Starting Lunar Mass Driver Sim at http://localhost:8050
-python app.py
+python app.py --debug
