@@ -141,8 +141,10 @@ app = dash.Dash(
 
 DEST_OPTIONS = [{"label": d.label, "value": d.id} for d in ALL_DESTINATIONS.values()]
 
-_BAR_HIDDEN = "hidden h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
-_BAR_SHOWN  = "h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
+_BAR_HIDDEN    = "hidden h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
+_BAR_SHOWN     = "h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
+_MODAL_CLOSED  = "hidden fixed inset-0 z-50 bg-black/70 items-center justify-center"
+_MODAL_OPEN    = "flex fixed inset-0 z-50 bg-black/70 items-center justify-center"
 
 app.layout = html.Div(
     className="min-h-screen bg-[#0d0d0d] p-3 text-gray-200",
@@ -160,7 +162,6 @@ app.layout = html.Div(
                     "hover:border-gray-300 hover:text-gray-200 flex items-center "
                     "justify-center transition-colors cursor-pointer leading-none shrink-0"
                 ),
-                **{"data-hs-overlay": "#help-modal"},
             ),
         ]),
         html.Div(className="w-72", children=[
@@ -214,52 +215,39 @@ app.layout = html.Div(
     dcc.Interval(id="poll-interval", interval=500, n_intervals=0, disabled=True),
     dcc.Store(id="active-dest", data=None),
 
-    # ── Help modal (Preline overlay) ──────────────────────────────────────────
+    # ── Help modal ────────────────────────────────────────────────────────────
     html.Div(
         id="help-modal",
-        className=(
-            "hs-overlay hidden size-full fixed top-0 start-0 z-[80] "
-            "overflow-x-hidden overflow-y-auto pointer-events-none"
-        ),
-        **{"role": "dialog", "aria-labelledby": "help-modal-label", "tabIndex": "-1"},
+        className=_MODAL_CLOSED,
         children=html.Div(
             className=(
-                "hs-overlay-open:mt-7 hs-overlay-open:opacity-100 "
-                "hs-overlay-open:duration-500 mt-0 opacity-0 ease-out transition-all "
-                "lg:max-w-5xl lg:w-full m-4 lg:mx-auto"
+                "bg-neutral-900 border border-neutral-700 rounded-xl shadow-xl "
+                "w-11/12 max-w-5xl max-h-[90vh] flex flex-col"
             ),
-            children=html.Div(
-                className=(
-                    "flex flex-col bg-neutral-900 border border-neutral-700 "
-                    "rounded-xl shadow-xl pointer-events-auto"
-                ),
-                children=[
-                    html.Div(
-                        className="flex justify-between items-center py-3 px-4 border-b border-neutral-700",
-                        children=[
-                            html.H3("Architecture & Documentation",
-                                    id="help-modal-label",
-                                    className="font-semibold text-gray-200"),
-                            html.Button(
-                                "×",
-                                className=(
-                                    "w-8 h-8 text-2xl text-gray-400 hover:text-gray-200 "
-                                    "flex items-center justify-center rounded-full "
-                                    "hover:bg-neutral-800 transition-colors cursor-pointer leading-none"
-                                ),
-                                **{"data-hs-overlay": "#help-modal"},
+            children=[
+                html.Div(
+                    className="flex justify-between items-center py-3 px-4 border-b border-neutral-700 shrink-0",
+                    children=[
+                        html.H3("Architecture & Documentation",
+                                className="font-semibold text-gray-200"),
+                        html.Button(
+                            "×", id="help-close-btn",
+                            className=(
+                                "w-8 h-8 text-2xl text-gray-400 hover:text-gray-200 "
+                                "flex items-center justify-center rounded-full "
+                                "hover:bg-neutral-800 transition-colors cursor-pointer leading-none"
                             ),
-                        ],
-                    ),
-                    html.Div(
-                        className="p-5 overflow-y-auto max-h-[75vh]",
-                        children=html.Div(
-                            dcc.Markdown(_ARCH_MD, link_target="_blank"),
-                            className="prose prose-invert prose-sm max-w-none",
                         ),
+                    ],
+                ),
+                html.Div(
+                    className="p-5 overflow-y-auto",
+                    children=html.Div(
+                        dcc.Markdown(_ARCH_MD, link_target="_blank"),
+                        className="prose prose-invert prose-sm max-w-none",
                     ),
-                ],
-            ),
+                ),
+            ],
         ),
     ),
 ])
@@ -335,6 +323,17 @@ def poll_progress(n, dest_id):
     return (build_empty_moon_map("Computing suitability map…"),
             build_empty_trajectory_view("Computing…"),
             {"width": f"{pct}%"}, _BAR_SHOWN, False, status)
+
+
+@app.callback(
+    Output("help-modal",    "className"),
+    Input("help-btn",       "n_clicks"),
+    Input("help-close-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def toggle_help_modal(open_n, close_n):
+    from dash import ctx
+    return _MODAL_OPEN if ctx.triggered_id == "help-btn" else _MODAL_CLOSED
 
 
 @app.callback(

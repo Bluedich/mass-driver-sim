@@ -2,7 +2,7 @@
 
 ## UI stack
 - **Tailwind CSS** (Play CDN) for all layout and styling
-- **Preline UI** (CDN) for interactive components (modals via `data-hs-overlay`)
+- **Preline UI** (CDN) for interactive components — note: Preline's overlay variants (`hs-overlay-open:*`) require the Tailwind plugin and a build step, so they don't work with the Play CDN. Use Dash callbacks to toggle `className` between `hidden …` and `flex …` for modals instead.
 - **No `dash-bootstrap-components`** — removed; do not re-add it
 - **No custom CSS files** unless a Dash component's internals cannot be reached with Tailwind (e.g. `dcc.Dropdown` internal colours use inline `style=` props instead)
 
