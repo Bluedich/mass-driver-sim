@@ -1,0 +1,7 @@
+numpy
+scipy
+plotly
+dash
+dash-bootstrap-components
+Pillow
+requests

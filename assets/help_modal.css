@@ -1,0 +1,100 @@
+/* Dark-theme overrides for dcc.Markdown inside the help modal */
+
+#help-modal .dash-markdown {
+    color: #ddd;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+#help-modal .dash-markdown h1 {
+    font-size: 1.5em;
+    border-bottom: 1px solid #444;
+    padding-bottom: 8px;
+    margin-top: 0;
+    margin-bottom: 16px;
+    color: #fff;
+}
+
+#help-modal .dash-markdown h2 {
+    font-size: 1.2em;
+    border-bottom: 1px solid #333;
+    padding-bottom: 6px;
+    margin-top: 28px;
+    margin-bottom: 12px;
+    color: #eee;
+}
+
+#help-modal .dash-markdown h3 {
+    font-size: 1.05em;
+    margin-top: 20px;
+    margin-bottom: 8px;
+    color: #ddd;
+}
+
+/* Inline code */
+#help-modal .dash-markdown code {
+    background-color: #2a2a2a;
+    color: #e0c068;
+    border-radius: 3px;
+    padding: 2px 5px;
+    font-size: 0.88em;
+    font-family: "Consolas", "Monaco", monospace;
+}
+
+/* Fenced code blocks */
+#help-modal .dash-markdown pre {
+    background-color: #141414;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 12px 0;
+}
+
+#help-modal .dash-markdown pre code {
+    background: none;
+    color: #bbb;
+    padding: 0;
+    font-size: 0.85em;
+}
+
+/* Tables */
+#help-modal .dash-markdown table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 14px 0;
+    font-size: 13px;
+}
+
+#help-modal .dash-markdown th {
+    background-color: #1e1e1e;
+    color: #fff;
+    font-weight: 600;
+    padding: 8px 14px;
+    border: 1px solid #444;
+    text-align: left;
+}
+
+#help-modal .dash-markdown td {
+    padding: 7px 14px;
+    border: 1px solid #383838;
+    color: #ccc;
+}
+
+#help-modal .dash-markdown tr:nth-child(even) td {
+    background-color: #1a1a1a;
+}
+
+/* Horizontal rules (used as section separators) */
+#help-modal .dash-markdown hr {
+    border: none;
+    border-top: 1px solid #333;
+    margin: 24px 0;
+}
+
+#help-modal .dash-markdown blockquote {
+    border-left: 3px solid #555;
+    padding-left: 12px;
+    color: #999;
+    margin-left: 0;
+}
