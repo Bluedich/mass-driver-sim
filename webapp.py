@@ -242,10 +242,7 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     className="p-5 overflow-y-auto",
-                    children=html.Div(
-                        dcc.Markdown(_ARCH_MD, link_target="_blank"),
-                        className="prose prose-invert prose-sm max-w-none",
-                    ),
+                    children=dcc.Markdown(_ARCH_MD, link_target="_blank"),
                 ),
             ],
         ),
