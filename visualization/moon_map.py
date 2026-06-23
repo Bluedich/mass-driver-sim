@@ -21,7 +21,85 @@ def _load_image_b64(filename):
         return base64.b64encode(f.read()).decode()
 
 
-def build_moon_map(lats, lons, dv_grid, destination_label=""):
+def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid):
+    """Add launch-direction arrows for every feasible grid site."""
+    GRID_STEP = 30.0   # degrees — matches GRID_LAT_STEP / GRID_LON_STEP in webapp.py
+    MAX_HALF  = GRID_STEP * 0.40   # 12° — arrow length at 0° elevation
+    MIN_HALF  = GRID_STEP * 0.10   #  3° — arrow length at 90° elevation
+
+    shaft_x, shaft_y = [], []
+    tip_x,   tip_y   = [], []
+    tip_az            = []
+    mid_x,   mid_y   = [], []
+    customdata        = []
+
+    for i, lat in enumerate(lats):
+        for j, lon in enumerate(lons):
+            dv  = dv_grid[i, j]
+            az  = az_grid[i, j]
+            el  = el_grid[i, j]
+            spd = spd_grid[i, j] if spd_grid is not None else np.nan
+            if not (np.isfinite(dv) and np.isfinite(az) and np.isfinite(el)):
+                continue
+
+            half   = MIN_HALF + (MAX_HALF - MIN_HALF) * (1.0 - el / 90.0)
+            az_rad = np.deg2rad(az)
+            dx     = half * np.sin(az_rad)   # east (+lon)
+            dy     = half * np.cos(az_rad)   # north (+lat)
+
+            shaft_x += [lon - dx, lon + dx, None]
+            shaft_y += [lat - dy, lat + dy, None]
+            tip_x.append(lon + dx)
+            tip_y.append(lat + dy)
+            tip_az.append(az)
+            mid_x.append(lon)
+            mid_y.append(lat)
+            customdata.append([lat, lon, az, el, spd, dv])
+
+    if not mid_x:
+        return
+
+    fig.add_trace(go.Scatter(
+        x=shaft_x, y=shaft_y,
+        mode="lines",
+        line=dict(color="rgba(255,255,255,0.85)", width=1.5),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=tip_x, y=tip_y,
+        mode="markers",
+        marker=dict(
+            symbol="triangle-up",
+            size=8,
+            color="rgba(255,255,255,0.9)",
+            angle=tip_az,
+            line=dict(width=0),
+        ),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=mid_x, y=mid_y,
+        mode="markers",
+        marker=dict(size=18, opacity=0, color="white"),
+        customdata=customdata,
+        hovertemplate=(
+            "<b>Lat %{customdata[0]:.0f}°, Lon %{customdata[1]:.0f}°</b><br>"
+            "Azimuth: %{customdata[2]:.1f}° (CW from N)<br>"
+            "Elevation: %{customdata[3]:.1f}°<br>"
+            "Launch speed: %{customdata[4]:.2f} km/s<br>"
+            "Post-launch ΔV: %{customdata[5]:.3f} km/s"
+            "<extra></extra>"
+        ),
+        showlegend=False,
+    ))
+
+
+def build_moon_map(lats, lons, dv_grid, destination_label="",
+                   az_grid=None, el_grid=None, spd_grid=None):
     """
     Build a Plotly figure: equirectangular Moon map with ΔV heatmap overlay.
 
@@ -82,6 +160,9 @@ def build_moon_map(lats, lons, dv_grid, destination_label=""):
         hoverongaps=False,
         hovertemplate="Lon: %{x:.1f}°<br>Lat: %{y:.1f}°<br>ΔV: %{z:.2f} km/s<extra></extra>",
     ))
+
+    if az_grid is not None and el_grid is not None:
+        _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid)
 
     fig.update_layout(
         title=dict(text=f"Launch suitability — {destination_label}", x=0.5,

@@ -232,32 +232,33 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
         max(finite_dvs) if finite_dvs else float("nan"),
     )
 
-    dv_grid = np.array(dv_flat, dtype=float).reshape(len(lats), len(lons))
-    trajs   = _pick_representative(lats, lons, dv_grid, params_flat, pairs)
+    dv_grid  = np.array(dv_flat, dtype=float).reshape(len(lats), len(lons))
+    az_flat  = [p["azimuth_deg"]   if p else np.nan for p in params_flat]
+    el_flat  = [p["elevation_deg"] if p else np.nan for p in params_flat]
+    spd_flat = [p["speed_kms"]     if p else np.nan for p in params_flat]
+    az_grid  = np.array(az_flat,  dtype=float).reshape(len(lats), len(lons))
+    el_grid  = np.array(el_flat,  dtype=float).reshape(len(lats), len(lons))
+    spd_grid = np.array(spd_flat, dtype=float).reshape(len(lats), len(lons))
+    trajs    = _pick_representative(lats, lons, dv_grid, params_flat, pairs)
 
-    return dv_grid, trajs
+    return dv_grid, trajs, az_grid, el_grid, spd_grid
 
 
-def _pick_representative(lats, lons, dv_grid, params_flat, pairs, n_wedges=8):
+def _pick_representative(lats, lons, dv_grid, params_flat, pairs, n=10):
     """
-    Select one trajectory per longitude wedge for the 3-D visualisation.
+    Select the n sites with the lowest ΔV for the 3-D visualisation.
     Returns a list of trajectory dicts (valid only).
     """
-    wedge_size = 360.0 / n_wedges
-    best = {}   # wedge_idx → (dv, params)
-
-    for i, (lat, lon) in enumerate(pairs):
-        dv = dv_grid.flat[i]
-        if not np.isfinite(dv):
-            continue
-        widx = int((lon % 360) / wedge_size) % n_wedges
-        if widx not in best or dv < best[widx][0]:
-            best[widx] = (dv, params_flat[i])
+    ranked = sorted(
+        ((dv_grid.flat[i], params_flat[i]) for i, _ in enumerate(pairs)
+         if np.isfinite(dv_grid.flat[i]) and params_flat[i] is not None),
+        key=lambda t: t[0],
+    )
 
     trajs = []
-    for widx in range(n_wedges):
-        if widx in best and best[widx][1] is not None:
-            p = best[widx][1]
-            if p.get("trajectory") is not None:
-                trajs.append(p["trajectory"])
+    for _, p in ranked:
+        if p.get("trajectory") is not None:
+            trajs.append(p["trajectory"])
+        if len(trajs) == n:
+            break
     return trajs
