@@ -64,7 +64,7 @@ def build_trajectory_view(trajectories, destination_label=""):
     fig = go.Figure()
 
     # ── Earth sphere ──────────────────────────────────────────────────────────
-    ex, ey, ez = _sphere_mesh(-MU, 0, 0, R_EARTH_DU * 3, n=30)
+    ex, ey, ez = _sphere_mesh(-MU, 0, 0, R_EARTH_DU, n=30)
     earth_b64 = _load_image_b64("earth.jpg")
 
     fig.add_trace(go.Surface(
@@ -78,7 +78,7 @@ def build_trajectory_view(trajectories, destination_label=""):
     ))
 
     # ── Moon sphere ───────────────────────────────────────────────────────────
-    mx, my, mz = _sphere_mesh(1 - MU, 0, 0, R_MOON_DU * 3, n=24)
+    mx, my, mz = _sphere_mesh(1 - MU, 0, 0, R_MOON_DU, n=24)
     fig.add_trace(go.Surface(
         x=mx * DU_KM, y=my * DU_KM, z=mz * DU_KM,
         colorscale=[[0, "rgb(160,160,160)"], [1, "rgb(220,220,220)"]],
@@ -136,29 +136,41 @@ def build_trajectory_view(trajectories, destination_label=""):
             ))
 
     # ── Layout ────────────────────────────────────────────────────────────────
-    # Axis range: show full Earth-Moon distance
-    ax_range = [-MU * DU_KM * 1.1, (1 - MU) * DU_KM * 1.1]
+    # Compute axis ranges from actual trajectory data so nothing is clipped.
+    all_x = np.concatenate([t["x"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
+    all_y = np.concatenate([t["y"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
+    all_z = np.concatenate([t["z"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
+
+    # Equalize all three axis spans so aspectmode="cube" gives 1 km = equal
+    # visual size in all directions, making sphere meshes appear as true spheres.
+    cx = (all_x.min() + all_x.max()) / 2
+    cy = (all_y.min() + all_y.max()) / 2
+    cz = (all_z.min() + all_z.max()) / 2
+    half = max(all_x.max() - all_x.min(),
+               all_y.max() - all_y.min(),
+               all_z.max() - all_z.min()) / 2 * 1.15
+
+    x_range = [cx - half, cx + half]
+    y_range = [cy - half, cy + half]
+    z_range = [cz - half, cz + half]
 
     fig.update_layout(
         title=dict(text=f"Sample trajectories — {destination_label}", x=0.5,
                    font=dict(size=13, color="#ccc")),
         scene=dict(
             xaxis=dict(title="X (km)", backgroundcolor="#111",
-                       gridcolor="#333", color="#aaa", range=ax_range),
+                       gridcolor="#333", color="#aaa", range=x_range),
             yaxis=dict(title="Y (km)", backgroundcolor="#111",
-                       gridcolor="#333", color="#aaa",
-                       range=[-DU_KM*0.3, DU_KM*0.3]),
+                       gridcolor="#333", color="#aaa", range=y_range),
             zaxis=dict(title="Z (km)", backgroundcolor="#111",
-                       gridcolor="#333", color="#aaa",
-                       range=[-DU_KM*0.3, DU_KM*0.3]),
+                       gridcolor="#333", color="#aaa", range=z_range),
             bgcolor="#111",
-            aspectmode="manual",
-            aspectratio=dict(x=3.0, y=0.9, z=0.9),
+            aspectmode="cube",
             camera=dict(eye=dict(x=0.8, y=-1.5, z=0.6)),
         ),
         paper_bgcolor="#111",
         margin=dict(l=0, r=0, t=40, b=0),
-        height=460,
+        height=560,
     )
 
     return fig
