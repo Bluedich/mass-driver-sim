@@ -106,8 +106,10 @@ def build_trajectory_view(trajectories, destination_label=""):
         "#b0bec5", "#90a4ae", "#78909c",
     ]
 
+    single = len(trajectories) == 1
     for i, traj in enumerate(trajectories):
-        color = colors[i % len(colors)]
+        color = "#ffd700" if single else colors[i % len(colors)]
+        width = 3 if single else 2
         x_km = traj["x"] * DU_KM
         y_km = traj["y"] * DU_KM
         z_km = traj["z"] * DU_KM
@@ -115,7 +117,7 @@ def build_trajectory_view(trajectories, destination_label=""):
         fig.add_trace(go.Scatter3d(
             x=x_km, y=y_km, z=z_km,
             mode="lines",
-            line=dict(color=color, width=2),
+            line=dict(color=color, width=width),
             name=f"Trajectory {i+1}",
             hoverinfo="skip",
             showlegend=False,

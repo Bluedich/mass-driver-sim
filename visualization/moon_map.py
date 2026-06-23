@@ -21,17 +21,19 @@ def _load_image_b64(filename):
         return base64.b64encode(f.read()).decode()
 
 
-def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid):
+def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
+                       selected_ij=None):
     """Add launch-direction arrows for every feasible grid site."""
     GRID_STEP = 30.0   # degrees — matches GRID_LAT_STEP / GRID_LON_STEP in webapp.py
     MAX_HALF  = GRID_STEP * 0.40   # 12° — arrow length at 0° elevation
     MIN_HALF  = GRID_STEP * 0.10   #  3° — arrow length at 90° elevation
 
-    shaft_x, shaft_y = [], []
-    tip_x,   tip_y   = [], []
-    tip_az            = []
-    mid_x,   mid_y   = [], []
-    customdata        = []
+    norm_shaft_x, norm_shaft_y = [], []
+    norm_tip_x,   norm_tip_y,   norm_tip_az = [], [], []
+    sel_shaft_x,  sel_shaft_y  = [], []
+    sel_tip_x,    sel_tip_y,    sel_tip_az  = [], [], []
+    mid_x,        mid_y        = [], []
+    customdata                 = []
 
     for i, lat in enumerate(lats):
         for j, lon in enumerate(lons):
@@ -47,11 +49,20 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid):
             dx     = half * np.sin(az_rad)   # east (+lon)
             dy     = half * np.cos(az_rad)   # north (+lat)
 
-            shaft_x += [lon - dx, lon + dx, None]
-            shaft_y += [lat - dy, lat + dy, None]
-            tip_x.append(lon + dx)
-            tip_y.append(lat + dy)
-            tip_az.append(az)
+            is_sel = selected_ij is not None and selected_ij == (i, j)
+            if is_sel:
+                sel_shaft_x += [lon - dx, lon + dx, None]
+                sel_shaft_y += [lat - dy, lat + dy, None]
+                sel_tip_x.append(lon + dx)
+                sel_tip_y.append(lat + dy)
+                sel_tip_az.append(az)
+            else:
+                norm_shaft_x += [lon - dx, lon + dx, None]
+                norm_shaft_y += [lat - dy, lat + dy, None]
+                norm_tip_x.append(lon + dx)
+                norm_tip_y.append(lat + dy)
+                norm_tip_az.append(az)
+
             mid_x.append(lon)
             mid_y.append(lat)
             customdata.append([lat, lon, az, el, spd, dv])
@@ -59,28 +70,53 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid):
     if not mid_x:
         return
 
-    fig.add_trace(go.Scatter(
-        x=shaft_x, y=shaft_y,
-        mode="lines",
-        line=dict(color="rgba(255,255,255,0.85)", width=1.5),
-        hoverinfo="skip",
-        showlegend=False,
-    ))
+    # Normal arrows
+    if norm_shaft_x:
+        fig.add_trace(go.Scatter(
+            x=norm_shaft_x, y=norm_shaft_y,
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.85)", width=1.5),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=norm_tip_x, y=norm_tip_y,
+            mode="markers",
+            marker=dict(
+                symbol="triangle-up",
+                size=8,
+                color="rgba(255,255,255,0.9)",
+                angle=norm_tip_az,
+                line=dict(width=0),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
 
-    fig.add_trace(go.Scatter(
-        x=tip_x, y=tip_y,
-        mode="markers",
-        marker=dict(
-            symbol="triangle-up",
-            size=8,
-            color="rgba(255,255,255,0.9)",
-            angle=tip_az,
-            line=dict(width=0),
-        ),
-        hoverinfo="skip",
-        showlegend=False,
-    ))
+    # Selected arrow (gold, thicker)
+    if sel_shaft_x:
+        fig.add_trace(go.Scatter(
+            x=sel_shaft_x, y=sel_shaft_y,
+            mode="lines",
+            line=dict(color="rgba(255,210,0,1.0)", width=3),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=sel_tip_x, y=sel_tip_y,
+            mode="markers",
+            marker=dict(
+                symbol="triangle-up",
+                size=14,
+                color="rgba(255,210,0,1.0)",
+                angle=sel_tip_az,
+                line=dict(color="white", width=1),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
 
+    # Invisible hit-targets for hover/click (all cells)
     fig.add_trace(go.Scatter(
         x=mid_x, y=mid_y,
         mode="markers",
@@ -99,7 +135,7 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid):
 
 
 def build_moon_map(lats, lons, dv_grid, destination_label="",
-                   az_grid=None, el_grid=None, spd_grid=None):
+                   az_grid=None, el_grid=None, spd_grid=None, selected_ij=None):
     """
     Build a Plotly figure: equirectangular Moon map with ΔV heatmap overlay.
 
@@ -162,7 +198,8 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
     ))
 
     if az_grid is not None and el_grid is not None:
-        _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid)
+        _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
+                           selected_ij=selected_ij)
 
     fig.update_layout(
         title=dict(text=f"Launch suitability — {destination_label}", x=0.5,

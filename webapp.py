@@ -54,46 +54,67 @@ _compute_state = {
     "t_start":     None,
     "result":      None,
     "dest_id":     None,
+    "cache_key":   None,
 }
 _lock = threading.Lock()
 
 
-def _run_computation(dest_id):
+def _make_sweep_arrays(n_az, n_el, max_el, n_sp):
+    """Build azimuth, elevation, and speed arrays from UI parameter counts."""
+    azimuths  = np.linspace(0, 360, int(n_az), endpoint=False)
+    if int(n_el) <= 1 or float(max_el) == 0:
+        elevations = np.array([0.0])
+    else:
+        elevations = np.linspace(0.0, float(max_el), int(n_el))
+    speeds_kms = np.linspace(2.2, 2.9, int(n_sp))
+    return azimuths, elevations, speeds_kms
+
+
+def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp):
+    return f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}_sp{int(n_sp)}"
+
+
+def _run_computation(dest_id, n_az, n_el, max_el, n_sp):
     """Background thread: compute suitability grid and sample trajectories."""
+    cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
+
     with _lock:
-        _compute_state["running"]  = True
-        _compute_state["progress"] = 0.0
-        _compute_state["result"]   = None
-        _compute_state["dest_id"]  = dest_id
+        _compute_state["running"]   = True
+        _compute_state["progress"]  = 0.0
+        _compute_state["result"]    = None
+        _compute_state["dest_id"]   = dest_id
+        _compute_state["cache_key"] = cache_key
 
     dest    = ALL_DESTINATIONS[dest_id]
     n_sites = len(LATS) * len(LONS)
     logger.info("Computation requested for '%s' (%d×%d = %d sites)",
                 dest.label, len(LATS), len(LONS), n_sites)
 
-    cache_path = os.path.join(CACHE_DIR, f"{dest_id}.npz")
     if os.path.exists(cache_path):
         logger.info("Cache hit: %s — loading from disk", cache_path)
         t0 = time.perf_counter()
         try:
             data     = np.load(cache_path, allow_pickle=True)
-            dv_grid  = data["dv_grid"]
-            trajs    = list(data["trajs"])
-            az_grid  = data["az_grid"]  if "az_grid"  in data else None
-            el_grid  = data["el_grid"]  if "el_grid"  in data else None
-            spd_grid = data["spd_grid"] if "spd_grid" in data else None
+            dv_grid    = data["dv_grid"]
+            trajs      = list(data["trajs"])
+            az_grid    = data["az_grid"]    if "az_grid"    in data else None
+            el_grid    = data["el_grid"]    if "el_grid"    in data else None
+            spd_grid   = data["spd_grid"]   if "spd_grid"   in data else None
+            cell_trajs = data["cell_trajs"] if "cell_trajs" in data else None
             logger.info("Cache loaded in %.2f s", time.perf_counter() - t0)
             with _lock:
-                _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id)
+                _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id, cache_key, cell_trajs)
                 _compute_state["running"]  = False
                 _compute_state["progress"] = 1.0
             return
         except Exception as exc:
             logger.warning("Cache load failed (%s) — recomputing", exc)
 
-    from physics.optimizer import compute_grid, N_PROPS
+    from physics.optimizer import compute_grid
 
-    n_props_total = n_sites * N_PROPS
+    azimuths, elevations, speeds_kms = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
+    n_props_total = n_sites * len(azimuths) * len(elevations) * len(speeds_kms)
     with _lock:
         _compute_state["props_done"]  = 0
         _compute_state["props_total"] = n_props_total
@@ -111,23 +132,27 @@ def _run_computation(dest_id):
             _compute_state["sites_done"] = sites_done
 
     t0 = time.perf_counter()
-    dv_grid, trajs, az_grid, el_grid, spd_grid = compute_grid(
+    dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs = compute_grid(
         LATS, LONS, dest,
         progress_cb=_progress,
         site_cb=_site_done,
+        azimuths=azimuths,
+        elevations=elevations,
+        speeds_kms=speeds_kms,
     )
     logger.info("Grid computation finished in %.1f s", time.perf_counter() - t0)
 
     t_save = time.perf_counter()
     try:
         np.savez(cache_path, dv_grid=dv_grid, trajs=np.array(trajs, dtype=object),
-                 az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
+                 az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid,
+                 cell_trajs=cell_trajs)
         logger.info("Cache saved to %s (%.2f s)", cache_path, time.perf_counter() - t_save)
     except Exception as exc:
         logger.warning("Cache save failed: %s", exc)
 
     with _lock:
-        _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id)
+        _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id, cache_key, cell_trajs)
         _compute_state["running"]  = False
         _compute_state["progress"] = 1.0
 
@@ -214,28 +239,60 @@ app.layout = html.Div(
     ]),
 
     # ── Controls ──────────────────────────────────────────────────────────────
-    html.Div(className="bg-neutral-900 rounded-lg px-4 pt-3 pb-4 mt-3", children=[
-        html.Div(className="flex items-start gap-10", children=[
-            html.Div(className="w-80 shrink-0", children=[
-                html.Label("Max launch elevation (°)",
-                           className="text-gray-400 text-xs font-medium block mb-3",
-                           htmlFor="max-elevation"),
-                dcc.Slider(
-                    id="max-elevation", min=0, max=90, step=5, value=5,
-                    marks={v: {"label": f"{v}°",
-                               "style": {"color": "#9ca3af", "fontSize": "10px"}}
-                           for v in range(0, 91, 15)},
-                    tooltip={"always_visible": True, "placement": "top"},
-                ),
+    html.Div(className="bg-neutral-900 rounded-lg px-4 py-3 mt-3", children=[
+        html.Div(className="flex items-end gap-6 flex-wrap mb-3", children=[
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Azimuths", htmlFor="n-azimuths",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Input(id="n-azimuths", type="number", value=8, min=2, max=64, step=2,
+                          debounce=True,
+                          className=(
+                              "w-20 bg-neutral-800 border border-neutral-700 rounded "
+                              "text-gray-200 text-sm px-2 py-1 focus:outline-none "
+                              "focus:border-gray-500"
+                          )),
             ]),
-            html.Div(className="flex flex-wrap items-center gap-2 pt-5",
-                     id="param-info"),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Max elevation (°)", htmlFor="max-elevation",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Input(id="max-elevation", type="number", value=5, min=0, max=90, step=5,
+                          debounce=True,
+                          className=(
+                              "w-20 bg-neutral-800 border border-neutral-700 rounded "
+                              "text-gray-200 text-sm px-2 py-1 focus:outline-none "
+                              "focus:border-gray-500"
+                          )),
+            ]),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Elevation steps", htmlFor="n-elevations",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Input(id="n-elevations", type="number", value=2, min=1, max=20, step=1,
+                          debounce=True,
+                          className=(
+                              "w-20 bg-neutral-800 border border-neutral-700 rounded "
+                              "text-gray-200 text-sm px-2 py-1 focus:outline-none "
+                              "focus:border-gray-500"
+                          )),
+            ]),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Speed candidates", htmlFor="n-speeds",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Input(id="n-speeds", type="number", value=10, min=3, max=60, step=1,
+                          debounce=True,
+                          className=(
+                              "w-20 bg-neutral-800 border border-neutral-700 rounded "
+                              "text-gray-200 text-sm px-2 py-1 focus:outline-none "
+                              "focus:border-gray-500"
+                          )),
+            ]),
         ]),
+        html.Div(className="flex flex-wrap items-center gap-2", id="param-info"),
     ]),
 
     # ── Hidden state ──────────────────────────────────────────────────────────
     dcc.Interval(id="poll-interval", interval=500, n_intervals=0, disabled=True),
     dcc.Store(id="active-dest", data=None),
+    dcc.Store(id="selected-cell", data=None),
 
     # ── Help modal ────────────────────────────────────────────────────────────
     html.Div(
@@ -275,50 +332,60 @@ app.layout = html.Div(
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("poll-interval", "disabled"),
-    Output("active-dest",   "data"),
-    Output("status-text",   "children"),
-    Output("calc-btn",      "children"),
-    Output("calc-btn",      "disabled"),
-    Input("dest-dropdown",  "value"),
+    Output("poll-interval",  "disabled"),
+    Output("active-dest",    "data"),
+    Output("status-text",    "children"),
+    Output("calc-btn",       "children"),
+    Output("calc-btn",       "disabled"),
+    Output("selected-cell",  "data"),
+    Input("dest-dropdown",   "value"),
+    State("n-azimuths",      "value"),
+    State("n-elevations",    "value"),
+    State("max-elevation",   "value"),
+    State("n-speeds",        "value"),
     prevent_initial_call=True,
 )
-def on_destination_select(dest_id):
+def on_destination_select(dest_id, n_az, n_el, max_el, n_sp):
     if not dest_id:
-        return True, None, "", "Calculate", True
+        return True, None, "", "Calculate", True, None
 
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
     with _lock:
         result = _compute_state.get("result")
-        if result and result[5] == dest_id:
-            # Result already in memory — enable one poll tick to re-render the map
-            return False, dest_id, "Loading cached result…", "Recalculate", False
+        if result and result[6] == cache_key:
+            return False, dest_id, "Loading cached result…", "Recalculate", False, None
 
-    cache_path = os.path.join(CACHE_DIR, f"{dest_id}.npz")
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
     if os.path.exists(cache_path):
-        # Load from disk cache in a background thread (fast path)
-        threading.Thread(target=_run_computation, args=(dest_id,), daemon=True).start()
-        return False, dest_id, "Loading from cache…", "Recalculate", True
+        threading.Thread(target=_run_computation,
+                         args=(dest_id, n_az, n_el, max_el, n_sp), daemon=True).start()
+        return False, dest_id, "Loading from cache…", "Recalculate", True, None
 
-    # No cache — wait for user to click Calculate
-    return True, dest_id, "", "Calculate", False
+    return True, dest_id, "", "Calculate", False, None
 
 
 @app.callback(
-    Output("poll-interval", "disabled",  allow_duplicate=True),
-    Output("status-text",   "children",  allow_duplicate=True),
-    Output("calc-btn",      "children",  allow_duplicate=True),
-    Output("calc-btn",      "disabled",  allow_duplicate=True),
+    Output("poll-interval", "disabled",     allow_duplicate=True),
+    Output("status-text",   "children",     allow_duplicate=True),
+    Output("calc-btn",      "children",     allow_duplicate=True),
+    Output("calc-btn",      "disabled",     allow_duplicate=True),
+    Output("selected-cell", "data",         allow_duplicate=True),
     Input("calc-btn",       "n_clicks"),
     State("active-dest",    "data"),
     State("calc-btn",       "children"),
+    State("n-azimuths",     "value"),
+    State("n-elevations",   "value"),
+    State("max-elevation",  "value"),
+    State("n-speeds",       "value"),
     prevent_initial_call=True,
 )
-def on_calculate_click(n_clicks, dest_id, btn_label):
+def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
 
     if btn_label == "Recalculate":
-        cache_path = os.path.join(CACHE_DIR, f"{dest_id}.npz")
+        cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
         try:
             os.remove(cache_path)
         except FileNotFoundError:
@@ -326,8 +393,9 @@ def on_calculate_click(n_clicks, dest_id, btn_label):
         with _lock:
             _compute_state["result"] = None
 
-    threading.Thread(target=_run_computation, args=(dest_id,), daemon=True).start()
-    return False, "Computing suitability map…", "Computing…", True
+    threading.Thread(target=_run_computation,
+                     args=(dest_id, n_az, n_el, max_el, n_sp), daemon=True).start()
+    return False, "Computing suitability map…", "Computing…", True, None
 
 
 @app.callback(
@@ -341,12 +409,18 @@ def on_calculate_click(n_clicks, dest_id, btn_label):
     Output("calc-btn",      "disabled",  allow_duplicate=True),
     Input("poll-interval",  "n_intervals"),
     State("active-dest",    "data"),
+    State("n-azimuths",     "value"),
+    State("n-elevations",   "value"),
+    State("max-elevation",  "value"),
+    State("n-speeds",       "value"),
     prevent_initial_call=True,
 )
-def poll_progress(n, dest_id):
+def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp):
     if not dest_id:
         return (build_empty_moon_map(), build_empty_trajectory_view(),
                 {"width": "0%"}, _BAR_HIDDEN, True, "", "Calculate", True)
+
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
 
     with _lock:
         progress    = _compute_state["progress"]
@@ -359,8 +433,8 @@ def poll_progress(n, dest_id):
 
     pct = int(progress * 100)
 
-    if result and result[5] == dest_id:
-        dv_grid, trajs, az_grid, el_grid, spd_grid, _ = result
+    if result and result[6] == cache_key:
+        dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
         dest = ALL_DESTINATIONS[dest_id]
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
@@ -395,18 +469,89 @@ def toggle_help_modal(open_n, close_n):
 
 
 @app.callback(
+    Output("selected-cell", "data",         allow_duplicate=True),
+    Input("moon-map",       "clickData"),
+    State("selected-cell",  "data"),
+    prevent_initial_call=True,
+)
+def on_map_click(click_data, current_sel):
+    if not click_data:
+        return None
+    points = click_data.get("points", [])
+    if not points:
+        return None
+    point = points[0]
+    customdata = point.get("customdata")
+    if customdata is None:
+        return None
+    lat, lon = customdata[0], customdata[1]
+    if current_sel and current_sel["lat"] == lat and current_sel["lon"] == lon:
+        return None
+    return {"lat": lat, "lon": lon}
+
+
+@app.callback(
+    Output("traj-view",    "figure",        allow_duplicate=True),
+    Output("moon-map",     "figure",        allow_duplicate=True),
+    Input("selected-cell", "data"),
+    State("active-dest",   "data"),
+    State("n-azimuths",    "value"),
+    State("n-elevations",  "value"),
+    State("max-elevation", "value"),
+    State("n-speeds",      "value"),
+    prevent_initial_call=True,
+)
+def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp):
+    if not dest_id:
+        raise dash.exceptions.PreventUpdate
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    with _lock:
+        result = _compute_state.get("result")
+    if not result or result[6] != cache_key:
+        raise dash.exceptions.PreventUpdate
+
+    dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
+    dest = ALL_DESTINATIONS[dest_id]
+
+    if sel_cell is None:
+        moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
+                                  az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
+        traj_fig = (build_trajectory_view(trajs, dest.label)
+                    if trajs else build_empty_trajectory_view("No valid trajectories found"))
+        return traj_fig, moon_fig
+
+    lat, lon = sel_cell["lat"], sel_cell["lon"]
+    i = int(np.argmin(np.abs(LATS - lat)))
+    j = int(np.argmin(np.abs(LONS - lon)))
+    moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
+                              az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid,
+                              selected_ij=(i, j))
+    if cell_trajs is not None and cell_trajs[i, j] is not None:
+        label = f"{dest.label} — Lat {lat:.0f}°, Lon {lon:.0f}°"
+        traj_fig = build_trajectory_view([cell_trajs[i, j]], label)
+    else:
+        traj_fig = build_empty_trajectory_view("No trajectory data for this site")
+    return traj_fig, moon_fig
+
+
+@app.callback(
     Output("param-info",   "children"),
+    Input("n-azimuths",    "value"),
+    Input("n-elevations",  "value"),
     Input("max-elevation", "value"),
+    Input("n-speeds",      "value"),
     Input("dest-dropdown", "value"),
 )
-def update_param_info(max_el, dest_id):
-    from physics.optimizer import N_AZ, ELEVATIONS, SPEEDS_KMS, N_PROPS
+def update_param_info(n_az, n_el, max_el, n_sp, dest_id):
     chip = ("px-2 py-0.5 rounded text-xs font-mono "
             "bg-neutral-800 text-gray-400 border border-neutral-700")
     dest_name = ALL_DESTINATIONS[dest_id].label if dest_id else "none"
+    _, elevations, _ = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
+    actual_n_el = len(elevations)
+    n_props = int(n_az) * actual_n_el * int(n_sp)
     return [
         html.Span(f"dest: {dest_name}", className=chip),
         html.Span(f"grid: {len(LATS)}×{len(LONS)}", className=chip),
-        html.Span(f"{N_AZ} az × {len(ELEVATIONS)} el × {len(SPEEDS_KMS)} spd", className=chip),
-        html.Span(f"{N_PROPS} prop/site", className=chip),
+        html.Span(f"{int(n_az)} az × {actual_n_el} el × {int(n_sp)} spd", className=chip),
+        html.Span(f"{n_props} prop/site", className=chip),
     ]

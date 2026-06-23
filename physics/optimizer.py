@@ -129,11 +129,12 @@ def _prop_worker(args):
     return site_idx, el, az, v_du, dv_nd, traj, elapsed
 
 
-def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_workers=None):
+def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_workers=None,
+                 azimuths=None, elevations=None, speeds_kms=None):
     """
     Compute suitability grid over all (lat, lon) pairs.
 
-    Submits one task per propagation (N_sites × N_PROPS) to a ProcessPoolExecutor.
+    Submits one task per propagation (N_sites × n_props) to a ProcessPoolExecutor.
     The destination is passed once per worker process via the pool initializer,
     so pickling overhead is O(n_workers), not O(n_tasks).  Workers pull tasks
     from a shared queue, eliminating idle time from per-site load imbalance.
@@ -145,8 +146,11 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     progress_cb : callable(props_done: int, props_total: int) or None
         Called after every completed propagation.
     site_cb     : callable(sites_done: int, sites_total: int) or None
-        Called when a full site's N_PROPS propagations are all back.
+        Called when a full site's n_props propagations are all back.
     n_workers   : int or None.  None → os.cpu_count() (all logical cores).
+    azimuths    : 1-D array of azimuth angles (°, CW from North), or None → default
+    elevations  : 1-D array of elevation angles (° above horizontal), or None → default
+    speeds_kms  : 1-D array of launch speeds (km/s), or None → default
 
     Returns
     -------
@@ -155,6 +159,12 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    azimuths_use   = AZIMUTHS   if azimuths   is None else np.asarray(azimuths,   dtype=float)
+    elevations_use = ELEVATIONS if elevations  is None else np.asarray(elevations, dtype=float)
+    speeds_kms_use = SPEEDS_KMS if speeds_kms  is None else np.asarray(speeds_kms, dtype=float)
+    speeds_du_use  = speed_du_per_tu(speeds_kms_use)
+    n_props        = len(elevations_use) * len(azimuths_use) * len(speeds_kms_use)
+
     if n_workers is None:
         # Use at most half the logical cores; spawning too many scipy/OpenBLAS
         # processes exhausts memory before the work is done.
@@ -162,11 +172,11 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
 
     pairs        = [(lat, lon) for lat in lats for lon in lons]
     n            = len(pairs)
-    total_props  = n * N_PROPS
+    total_props  = n * n_props
 
     logger.info(
         "Starting grid: %d sites, %d workers, %d propagations/site (%d total)",
-        n, n_workers, N_PROPS, total_props,
+        n, n_workers, n_props, total_props,
     )
 
     # Per-site accumulators
@@ -179,9 +189,9 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     tasks = [
         (site_idx, lat, lon, el, az, v_du)
         for site_idx, (lat, lon) in enumerate(pairs)
-        for el in ELEVATIONS
-        for az in AZIMUTHS
-        for v_du in SPEEDS_DU
+        for el in elevations_use
+        for az in azimuths_use
+        for v_du in speeds_du_use
     ]
 
     with ProcessPoolExecutor(
@@ -209,7 +219,7 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
                 progress_cb(props_done[0], total_props)
 
             site_counts[site_idx] += 1
-            if site_counts[site_idx] == N_PROPS:
+            if site_counts[site_idx] == n_props:
                 sites_done[0] += 1
                 dv, params = site_best[site_idx]
                 dv_str = f"{dv:.3f} km/s" if np.isfinite(dv) else "unreachable"
@@ -241,7 +251,12 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     spd_grid = np.array(spd_flat, dtype=float).reshape(len(lats), len(lons))
     trajs    = _pick_representative(lats, lons, dv_grid, params_flat, pairs)
 
-    return dv_grid, trajs, az_grid, el_grid, spd_grid
+    cell_trajs = np.empty((len(lats), len(lons)), dtype=object)
+    for i_site, p in enumerate(params_flat):
+        ri, rj = divmod(i_site, len(lons))
+        cell_trajs[ri, rj] = p["trajectory"] if p is not None else None
+
+    return dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs
 
 
 def _pick_representative(lats, lons, dv_grid, params_flat, pairs, n=10):
