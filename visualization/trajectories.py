@@ -222,12 +222,11 @@ def build_trajectory_view(trajectories, destination_label="", uirevision=None):
                        gridcolor="#333", color="#aaa", range=z_range),
             bgcolor="#111",
             aspectmode="cube",
-            # Plotly uses look_at: zaxis = normalize(eye-center), xaxis = normalize(cross(up, zaxis)).
-            # With up=(0,0,1): screen_right = normalize(-eye.y, eye.x, 0).
-            # east (+y) on screen-right requires eye.x > 0;
+            # screen_right = normalize(-eye.y, eye.x, 0).
+            # east (+y) on screen-LEFT requires eye.x < 0 (matches moon-map convention);
             # Moon (high +x) right of Earth requires eye.y < 0.
-            # eye=(0.8, -1.2, 0.8): screen_right=(0.83, 0.55, 0) — both satisfied.
-            camera=dict(eye=dict(x=0.8, y=-1.2, z=0.8)),
+            # eye=(-0.8, -1.2, 0.8): screen_right=(0.83, -0.55, 0) — both satisfied.
+            camera=dict(eye=dict(x=-0.8, y=-1.2, z=0.8)),
             uirevision=uirevision,
         ),
         paper_bgcolor="#111",

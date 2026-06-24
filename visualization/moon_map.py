@@ -49,21 +49,25 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
             dx     = half * np.sin(az_rad)   # east (+lon)
             dy     = half * np.cos(az_rad)   # north (+lat)
 
+            # Display uses x = −lon so east appears on the left (matching the image)
+            xc = -lon   # display x of this cell centre
+            az_disp = (360 - az) % 360  # mirror azimuth for the flipped x-axis
+
             is_sel = selected_ij is not None and selected_ij == (i, j)
             if is_sel:
-                sel_shaft_x += [lon - dx, lon + dx, None]
+                sel_shaft_x += [xc + dx, xc - dx, None]
                 sel_shaft_y += [lat - dy, lat + dy, None]
-                sel_tip_x.append(lon + dx)
+                sel_tip_x.append(xc - dx)
                 sel_tip_y.append(lat + dy)
-                sel_tip_az.append(az)
+                sel_tip_az.append(az_disp)
             else:
-                norm_shaft_x += [lon - dx, lon + dx, None]
+                norm_shaft_x += [xc + dx, xc - dx, None]
                 norm_shaft_y += [lat - dy, lat + dy, None]
-                norm_tip_x.append(lon + dx)
+                norm_tip_x.append(xc - dx)
                 norm_tip_y.append(lat + dy)
-                norm_tip_az.append(az)
+                norm_tip_az.append(az_disp)
 
-            mid_x.append(lon)
+            mid_x.append(xc)
             mid_y.append(lat)
             customdata.append([lat, lon, az, el, spd, dv])
 
@@ -180,10 +184,16 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
         [1.0, "rgb(200,0,0)"],
     ]
 
+    # x = −lon so east is on the left, matching the image convention.
+    # Store physical lon in `text` so hover shows the real selenographic value.
+    hover_text = np.array([[f"{lons[j]:.1f}°" for j in range(len(lons))]
+                           for _ in range(len(lats))])
+
     fig.add_trace(go.Heatmap(
-        x=lons,
+        x=-lons,
         y=lats,
         z=dv_plot,
+        text=hover_text,
         colorscale=colorscale,
         opacity=0.65,
         zmin=np.nanpercentile(dv_plot, 2)  if np.any(np.isfinite(dv_plot)) else 0,
@@ -194,7 +204,7 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
             len=0.8,
         ),
         hoverongaps=False,
-        hovertemplate="Lon: %{x:.1f}°<br>Lat: %{y:.1f}°<br>ΔV: %{z:.2f} km/s<extra></extra>",
+        hovertemplate="Lon: %{text}<br>Lat: %{y:.1f}°<br>ΔV: %{z:.2f} km/s<extra></extra>",
     ))
 
     if az_grid is not None and el_grid is not None:
@@ -205,8 +215,11 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
         title=dict(text=f"Launch suitability — {destination_label}", x=0.5,
                    font=dict(size=13, color="#ccc")),
         xaxis=dict(
-            title="Longitude (°)", range=[-180, 180],
+            title="Longitude (°)",
+            range=[-180, 180],
+            # x = −lon: east is on the left, west on the right
             tickvals=[-180, -120, -60, 0, 60, 120, 180],
+            ticktext=["180°", "120°E", "60°E", "0°", "60°W", "120°W", "180°"],
             gridcolor="#333", zerolinecolor="#555",
             color="#aaa",
         ),
@@ -254,7 +267,8 @@ def build_empty_moon_map(message="Select a destination to compute suitability ma
     fig.update_layout(
         xaxis=dict(range=[-180, 180], showgrid=False, zeroline=False,
                    showticklabels=True, color="#aaa",
-                   tickvals=[-180, -120, -60, 0, 60, 120, 180]),
+                   tickvals=[-180, -120, -60, 0, 60, 120, 180],
+                   ticktext=["180°", "120°E", "60°E", "0°", "60°W", "120°W", "180°"]),
         yaxis=dict(range=[-90, 90], showgrid=False, zeroline=False,
                    showticklabels=True, color="#aaa",
                    tickvals=[-90, -60, -30, 0, 30, 60, 90],
