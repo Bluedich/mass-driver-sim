@@ -165,3 +165,32 @@ def dist_from_earth(state):
 def dist_from_moon(state):
     x, y, z = state[:3]
     return np.sqrt((x - 1 + MU)**2 + y**2 + z**2)
+
+
+def lagrange_points():
+    """
+    Return the 5 CR3BP Lagrange points in DU as [(x, y, z, label), ...].
+
+    L1–L3 are on the x-axis and are solved numerically.
+    L4–L5 are the equilateral triangular points.
+    """
+    from scipy.optimize import brentq
+
+    def f(x):
+        r1 = abs(x + MU)
+        r2 = abs(x - 1 + MU)
+        return x - (1 - MU) * (x + MU) / r1**3 - MU * (x - 1 + MU) / r2**3
+
+    L1_x = brentq(f, -MU + 1e-6, 1 - MU - 1e-6)
+    L2_x = brentq(f, 1 - MU + 1e-6, 2.0)
+    L3_x = brentq(f, -2.0, -MU - 1e-6)
+    L4 = (0.5 - MU,  np.sqrt(3) / 2, 0.0)
+    L5 = (0.5 - MU, -np.sqrt(3) / 2, 0.0)
+
+    return [
+        (L1_x,  0.0, 0.0, "L1"),
+        (L2_x,  0.0, 0.0, "L2"),
+        (L3_x,  0.0, 0.0, "L3"),
+        (L4[0], L4[1], L4[2], "L4"),
+        (L5[0], L5[1], L5[2], "L5"),
+    ]

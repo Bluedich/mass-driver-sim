@@ -17,7 +17,7 @@ from dash import dcc, html, Input, Output, State
 
 from destinations.earth_leo import ALL_DESTINATIONS
 from visualization.moon_map import build_moon_map, build_empty_moon_map
-from visualization.trajectories import build_trajectory_view, build_empty_trajectory_view
+from visualization.trajectories import build_trajectory_view, build_empty_trajectory_view, scene_bounds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,13 +70,15 @@ def _make_sweep_arrays(n_az, n_el, max_el, n_sp):
     return azimuths, elevations, speeds_kms
 
 
-def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp):
-    return f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}_sp{int(n_sp)}"
+def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
+    return f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}_sp{int(n_sp)}_ins{insertion_mode}"
 
 
-def _run_computation(dest_id, n_az, n_el, max_el, n_sp):
+def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
     """Background thread: compute suitability grid and sample trajectories."""
-    cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    dest = ALL_DESTINATIONS[dest_id]
+    dest.insertion_mode = insertion_mode
+    cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
     cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
 
     with _lock:
@@ -86,7 +88,6 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp):
         _compute_state["dest_id"]   = dest_id
         _compute_state["cache_key"] = cache_key
 
-    dest    = ALL_DESTINATIONS[dest_id]
     n_sites = len(LATS) * len(LONS)
     logger.info("Computation requested for '%s' (%d×%d = %d sites)",
                 dest.label, len(LATS), len(LONS), n_sites)
@@ -232,10 +233,26 @@ app.layout = html.Div(
         html.Div(className="rounded-lg overflow-hidden",
                  children=dcc.Graph(id="moon-map", figure=build_empty_moon_map(),
                                     config={"displayModeBar": False})),
-        html.Div(className="rounded-lg overflow-hidden",
-                 children=dcc.Graph(id="traj-view", figure=build_empty_trajectory_view(),
-                                    config={"displayModeBar": True,
-                                            "modeBarButtonsToRemove": ["toImage"]})),
+        html.Div(className="flex flex-col gap-1", children=[
+            html.Div(className="flex gap-1", children=[
+                html.Button("Center: Moon", id="center-moon-btn", n_clicks=0,
+                            className=(
+                                "px-2 py-0.5 text-xs rounded border border-neutral-700 "
+                                "text-gray-400 hover:border-gray-500 hover:text-gray-200 "
+                                "transition-colors cursor-pointer"
+                            )),
+                html.Button("Center: Earth", id="center-earth-btn", n_clicks=0,
+                            className=(
+                                "px-2 py-0.5 text-xs rounded border border-neutral-700 "
+                                "text-gray-400 hover:border-gray-500 hover:text-gray-200 "
+                                "transition-colors cursor-pointer"
+                            )),
+            ]),
+            html.Div(className="rounded-lg overflow-hidden",
+                     children=dcc.Graph(id="traj-view", figure=build_empty_trajectory_view(),
+                                        config={"displayModeBar": True,
+                                                "modeBarButtonsToRemove": ["toImage"]})),
+        ]),
     ]),
 
     # ── Controls ──────────────────────────────────────────────────────────────
@@ -284,6 +301,22 @@ app.layout = html.Div(
                               "text-gray-200 text-sm px-2 py-1 focus:outline-none "
                               "focus:border-gray-500"
                           )),
+            ]),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Insertion", htmlFor="insertion-mode",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Dropdown(
+                    id="insertion-mode",
+                    options=[
+                        {"label": "Prograde only",   "value": "prograde"},
+                        {"label": "Retrograde only", "value": "retrograde"},
+                        {"label": "Both (cheapest)", "value": "both"},
+                    ],
+                    value="prograde",
+                    clearable=False,
+                    style={"backgroundColor": "#262626", "color": "#e5e5e5",
+                           "border": "1px solid #525252", "minWidth": "150px"},
+                ),
             ]),
         ]),
         html.Div(className="flex flex-wrap items-center gap-2", id="param-info"),
@@ -338,30 +371,34 @@ app.layout = html.Div(
     Output("calc-btn",       "children"),
     Output("calc-btn",       "disabled"),
     Output("selected-cell",  "data"),
+    Output("insertion-mode", "value"),
     Input("dest-dropdown",   "value"),
     State("n-azimuths",      "value"),
     State("n-elevations",    "value"),
     State("max-elevation",   "value"),
     State("n-speeds",        "value"),
+    State("insertion-mode",  "value"),
     prevent_initial_call=True,
 )
-def on_destination_select(dest_id, n_az, n_el, max_el, n_sp):
+def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     if not dest_id:
-        return True, None, "", "Calculate", True, None
+        return True, None, "", "Calculate", True, None, "prograde"
 
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    dest = ALL_DESTINATIONS[dest_id]
+    default_mode = dest.default_insertion_mode
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, default_mode)
     with _lock:
         result = _compute_state.get("result")
         if result and result[6] == cache_key:
-            return False, dest_id, "Loading cached result…", "Recalculate", False, None
+            return False, dest_id, "Loading cached result…", "Recalculate", False, None, default_mode
 
     cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
     if os.path.exists(cache_path):
         threading.Thread(target=_run_computation,
-                         args=(dest_id, n_az, n_el, max_el, n_sp), daemon=True).start()
-        return False, dest_id, "Loading from cache…", "Recalculate", True, None
+                         args=(dest_id, n_az, n_el, max_el, n_sp, default_mode), daemon=True).start()
+        return False, dest_id, "Loading from cache…", "Recalculate", True, None, default_mode
 
-    return True, dest_id, "", "Calculate", False, None
+    return True, dest_id, "", "Calculate", False, None, default_mode
 
 
 @app.callback(
@@ -377,14 +414,15 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp):
     State("n-elevations",   "value"),
     State("max-elevation",  "value"),
     State("n-speeds",       "value"),
+    State("insertion-mode", "value"),
     prevent_initial_call=True,
 )
-def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp):
+def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp, insertion_mode):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
 
     if btn_label == "Recalculate":
-        cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+        cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
         cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
         try:
             os.remove(cache_path)
@@ -394,7 +432,7 @@ def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp):
             _compute_state["result"] = None
 
     threading.Thread(target=_run_computation,
-                     args=(dest_id, n_az, n_el, max_el, n_sp), daemon=True).start()
+                     args=(dest_id, n_az, n_el, max_el, n_sp, insertion_mode), daemon=True).start()
     return False, "Computing suitability map…", "Computing…", True, None
 
 
@@ -413,14 +451,15 @@ def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp):
     State("n-elevations",   "value"),
     State("max-elevation",  "value"),
     State("n-speeds",       "value"),
+    State("insertion-mode", "value"),
     prevent_initial_call=True,
 )
-def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp):
+def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     if not dest_id:
         return (build_empty_moon_map(), build_empty_trajectory_view(),
                 {"width": "0%"}, _BAR_HIDDEN, True, "", "Calculate", True)
 
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
 
     with _lock:
         progress    = _compute_state["progress"]
@@ -499,12 +538,13 @@ def on_map_click(click_data, current_sel):
     State("n-elevations",  "value"),
     State("max-elevation", "value"),
     State("n-speeds",      "value"),
+    State("insertion-mode", "value"),
     prevent_initial_call=True,
 )
-def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp):
+def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
     with _lock:
         result = _compute_state.get("result")
     if not result or result[6] != cache_key:
@@ -532,6 +572,60 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp):
     else:
         traj_fig = build_empty_trajectory_view("No trajectory data for this site")
     return traj_fig, moon_fig
+
+
+@app.callback(
+    Output("traj-view",         "figure",     allow_duplicate=True),
+    Input("center-moon-btn",    "n_clicks"),
+    Input("center-earth-btn",   "n_clicks"),
+    State("active-dest",        "data"),
+    State("selected-cell",      "data"),
+    State("n-azimuths",         "value"),
+    State("n-elevations",       "value"),
+    State("max-elevation",      "value"),
+    State("n-speeds",           "value"),
+    State("insertion-mode",     "value"),
+    prevent_initial_call=True,
+)
+def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, n_sp, insertion_mode):
+    from dash import ctx, Patch
+    from physics.cr3bp import MU, DU_KM as _DU_KM
+
+    if not dest_id:
+        raise dash.exceptions.PreventUpdate
+
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
+    with _lock:
+        result = _compute_state.get("result")
+    if not result or result[6] != cache_key:
+        raise dash.exceptions.PreventUpdate
+
+    _, trajs, _, _, _, _, _, cell_trajs = result
+
+    traj_list = trajs
+    if sel_cell is not None and cell_trajs is not None:
+        i = int(np.argmin(np.abs(LATS - sel_cell["lat"])))
+        j = int(np.argmin(np.abs(LONS - sel_cell["lon"])))
+        if cell_trajs[i, j] is not None:
+            traj_list = [cell_trajs[i, j]]
+
+    if not traj_list:
+        raise dash.exceptions.PreventUpdate
+
+    cx, cy, cz, half = scene_bounds(traj_list)
+
+    if ctx.triggered_id == "center-moon-btn":
+        tx = (1 - MU) * _DU_KM
+    else:
+        tx = -MU * _DU_KM
+
+    patched = Patch()
+    patched["layout"]["scene"]["camera"]["center"] = {
+        "x": (tx - cx) / (2 * half),
+        "y": (0.0 - cy) / (2 * half),
+        "z": (0.0 - cz) / (2 * half),
+    }
+    return patched
 
 
 @app.callback(

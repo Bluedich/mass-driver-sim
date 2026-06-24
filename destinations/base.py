@@ -14,6 +14,7 @@ class Destination(ABC):
 
     id: str        # unique identifier, used as cache key
     label: str     # human-readable name shown in the UI
+    default_insertion_mode: str = "both"   # subclasses override as needed
 
     @abstractmethod
     def compute_deltav(self, state0):

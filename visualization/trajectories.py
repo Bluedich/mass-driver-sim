@@ -12,7 +12,7 @@ import numpy as np
 import plotly.graph_objects as go
 import base64, os
 
-from physics.cr3bp import MU, R_EARTH_DU, R_MOON_DU, DU_KM
+from physics.cr3bp import MU, R_EARTH_DU, R_MOON_DU, DU_KM, lagrange_points
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
 
@@ -44,6 +44,25 @@ def _dv_color(dv_kms, dv_min, dv_max):
     r = int(255 * t)
     g = int(255 * (1 - t))
     return f"rgb({r},{g},0)"
+
+
+def scene_bounds(trajectories):
+    """
+    Compute the scene center (cx, cy, cz) and half-span (half) in km from a
+    list of trajectory dicts.  Returns floats in km.
+    """
+    if not trajectories:
+        return 0.0, 0.0, 0.0, 1.0
+    all_x = np.concatenate([t["x"] for t in trajectories]) * DU_KM
+    all_y = np.concatenate([t["y"] for t in trajectories]) * DU_KM
+    all_z = np.concatenate([t["z"] for t in trajectories]) * DU_KM
+    cx = (all_x.min() + all_x.max()) / 2
+    cy = (all_y.min() + all_y.max()) / 2
+    cz = (all_z.min() + all_z.max()) / 2
+    half = max(all_x.max() - all_x.min(),
+               all_y.max() - all_y.min(),
+               all_z.max() - all_z.min()) / 2 * 1.15
+    return cx, cy, cz, half
 
 
 def build_trajectory_view(trajectories, destination_label=""):
@@ -123,6 +142,17 @@ def build_trajectory_view(trajectories, destination_label=""):
             showlegend=False,
         ))
 
+        # Launch-site marker: small sphere in world space so it scales with zoom
+        if single:
+            R_m = 150.0 / DU_KM  # 150 km radius ≈ 1/12 Moon radius
+            sx, sy, sz = _sphere_mesh(traj["x"][0], traj["y"][0], traj["z"][0], R_m, n=10)
+            fig.add_trace(go.Surface(
+                x=sx * DU_KM, y=sy * DU_KM, z=sz * DU_KM,
+                colorscale=[[0, "#00ff99"], [1, "#00ff99"]],
+                showscale=False, opacity=1.0,
+                hoverinfo="skip",
+            ))
+
         # Burn dots
         for burn in traj.get("burns", []):
             bcolor = _dv_color(burn["dv_kms"], dv_min, dv_max)
@@ -137,21 +167,26 @@ def build_trajectory_view(trajectories, destination_label=""):
                 showlegend=False,
             ))
 
+    # ── Lagrange points ───────────────────────────────────────────────────────
+    lp_list = lagrange_points()
+    lp_x = [p[0] * DU_KM for p in lp_list]
+    lp_y = [p[1] * DU_KM for p in lp_list]
+    lp_z = [p[2] * DU_KM for p in lp_list]
+    lp_labels = [p[3] for p in lp_list]
+    fig.add_trace(go.Scatter3d(
+        x=lp_x, y=lp_y, z=lp_z,
+        mode="markers+text",
+        marker=dict(size=5, color="#ff9900", symbol="diamond",
+                    line=dict(color="white", width=1)),
+        text=lp_labels,
+        textposition="top center",
+        textfont=dict(color="#ff9900", size=10),
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
     # ── Layout ────────────────────────────────────────────────────────────────
-    # Compute axis ranges from actual trajectory data so nothing is clipped.
-    all_x = np.concatenate([t["x"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
-    all_y = np.concatenate([t["y"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
-    all_z = np.concatenate([t["z"] for t in trajectories]) * DU_KM if trajectories else np.array([0.0])
-
-    # Equalize all three axis spans so aspectmode="cube" gives 1 km = equal
-    # visual size in all directions, making sphere meshes appear as true spheres.
-    cx = (all_x.min() + all_x.max()) / 2
-    cy = (all_y.min() + all_y.max()) / 2
-    cz = (all_z.min() + all_z.max()) / 2
-    half = max(all_x.max() - all_x.min(),
-               all_y.max() - all_y.min(),
-               all_z.max() - all_z.min()) / 2 * 1.15
-
+    cx, cy, cz, half = scene_bounds(trajectories)
     x_range = [cx - half, cx + half]
     y_range = [cy - half, cy + half]
     z_range = [cz - half, cz + half]
@@ -168,7 +203,12 @@ def build_trajectory_view(trajectories, destination_label=""):
                        gridcolor="#333", color="#aaa", range=z_range),
             bgcolor="#111",
             aspectmode="cube",
-            camera=dict(eye=dict(x=0.8, y=-1.5, z=0.6)),
+            # Plotly 3D: screen_right = cross(up, forward) where forward=normalize(eye-center).
+            # screen_right = (eye.y, -eye.x, 0)/|eye|.
+            # east (+y) on screen-right requires eye.x < 0;
+            # Moon (high +x) right of Earth (low x) requires eye.y > 0.
+            # eye=(-0.8, 1.2, 0.8): screen_right=(0.73, 0.49, 0) — both satisfied.
+            camera=dict(eye=dict(x=-0.8, y=1.2, z=0.8)),
         ),
         paper_bgcolor="#111",
         margin=dict(l=0, r=0, t=40, b=0),

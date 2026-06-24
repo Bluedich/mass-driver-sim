@@ -6,10 +6,10 @@ Strategy
 1. Propagate CR3BP from launch state for up to T_MAX TU.
 2. Detect when the trajectory crosses r = R_TARGET from ABOVE (inbound).
    This fires whether the periapsis is exactly at the target, above it, or below.
-3. At that crossing, compute ΔV = √[(v_t − v_circ)² + v_r²]
-   where v_r = radial speed (0 if we arrive exactly at periapsis = target altitude)
-         v_t = tangential speed in Earth-centred inertial frame
-   The optimiser naturally finds trajectories where periapsis ≈ target (v_r → 0).
+3. At that crossing, compute ΔV = |v_inertial − v_target_orbit|
+   where v_target is the prograde or retrograde circular orbit velocity in
+   the equatorial plane.  Both options are tried; the cheaper burn wins.
+   Out-of-plane velocity (vz) is correctly included in the DV cost.
 4. If the trajectory never crosses r = R_TARGET, return ΔV = ∞.
 """
 
@@ -55,6 +55,8 @@ class EarthLEO1200(Destination):
 
     id    = "earth_leo_1200"
     label = "1 200 km LEO (Moon orbit plane)"
+    default_insertion_mode = "prograde"
+    insertion_mode         = "prograde"
 
     def compute_deltav(self, state0):
         """
@@ -88,7 +90,7 @@ class EarthLEO1200(Destination):
             return np.inf, traj
 
         state_cross = sol.y_events[0][0]
-        dv_nd, dv_kms = _circularization_deltav(state_cross)
+        dv_nd, dv_kms = _circularization_deltav(state_cross, mode=self.insertion_mode)
 
         traj["burns"].append({
             "x":      state_cross[0],
@@ -100,19 +102,13 @@ class EarthLEO1200(Destination):
         return dv_nd, traj
 
 
-def _circularization_deltav(state):
+def _circularization_deltav(state, mode="prograde"):
     """
-    ΔV to circularise at the target altitude crossing.
+    ΔV to circularise into the target orbit (0° inclination, Moon-orbit plane).
 
-    At any point on the trajectory (not necessarily periapsis):
-        ΔV = √[(v_t − v_circ)² + v_r²]
-    where:
-        v_r = radial speed (Earth-centred inertial)
-        v_t = tangential speed (Earth-centred inertial)
-        v_circ = √(μ_E / r)
-
-    The optimiser will find trajectories where v_r → 0 (periapsis ≈ target),
-    minimising ΔV naturally.
+    mode : "prograde" | "retrograde" | "both"
+        Controls which circular orbit direction(s) are evaluated.
+        "both" takes the cheaper of the two.
     """
     x, y, z, vx, vy, vz = state
 
@@ -126,24 +122,37 @@ def _circularization_deltav(state):
     if r <= R_EARTH_DU:
         return np.inf, np.inf
 
-    # Rotating → Earth-centred inertial: Ω×r = (−ye, xe, 0)
+    # In-plane radius (needed for azimuthal direction of target orbit)
+    rp = np.sqrt(xe**2 + ye**2)
+    if rp < 1e-10:   # polar crossing — azimuth undefined
+        return np.inf, np.inf
+
+    # Rotating → Earth-centred inertial: add Ω×r (Ω=1 in non-dim units)
     vxi = vx - ye
     vyi = vy + xe
     vzi = vz
 
-    # Radial unit vector
-    r_hat = np.array([xe, ye, ze]) / r
-
-    # Decompose velocity into radial and tangential
-    v_vec  = np.array([vxi, vyi, vzi])
-    v_r    = np.dot(v_vec, r_hat)            # radial (positive = receding)
-    v_t    = np.sqrt(max(0.0, np.dot(v_vec, v_vec) - v_r**2))   # tangential magnitude
-
-    # Circular speed at this radius
+    # Circular speed at current radius
     v_circ = np.sqrt(MU_EARTH_ND / r)
 
-    # ΔV to circularise
-    dv_nd  = np.sqrt((v_t - v_circ)**2 + v_r**2)
+    # Target orbit velocity vectors in the equatorial plane:
+    #   prograde  φ̂ = (−ye/rp,  xe/rp, 0)
+    #   retrograde    = ( ye/rp, −xe/rp, 0)
+    dv_pro = np.sqrt((vxi + v_circ * ye / rp)**2 +
+                     (vyi - v_circ * xe / rp)**2 +
+                     vzi**2)
+    if mode == "prograde":
+        dv_nd = dv_pro
+    elif mode == "retrograde":
+        dv_ret = np.sqrt((vxi - v_circ * ye / rp)**2 +
+                         (vyi + v_circ * xe / rp)**2 +
+                         vzi**2)
+        dv_nd = dv_ret
+    else:
+        dv_ret = np.sqrt((vxi - v_circ * ye / rp)**2 +
+                         (vyi + v_circ * xe / rp)**2 +
+                         vzi**2)
+        dv_nd = min(dv_pro, dv_ret)
     dv_kms = dv_nd * VU_KMS
 
     return dv_nd, dv_kms
