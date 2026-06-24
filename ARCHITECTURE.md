@@ -4,7 +4,7 @@
 
 A Plotly Dash web application that computes and visualises the orbital transfer ΔV from every point on the Moon's surface to a selectable destination orbit. The physics engine uses the Circular Restricted 3-Body Problem (CR3BP) to model Earth–Moon dynamics. Results are cached as `.npz` files so reloads are instant.
 
-```
+```text
 Browser ←—— Dash (app.py) ——→ background thread
                                      │
                            physics/optimizer.py
@@ -21,7 +21,7 @@ Browser ←—— Dash (app.py) ——→ background thread
 
 ## Directory Layout
 
-```
+```text
 app.py                        Dash entry point, layout, callbacks
 physics/
     cr3bp.py                  CR3BP EOM, RK45 propagator, event factories
@@ -72,7 +72,7 @@ The frame co-rotates with the Earth–Moon system at the mean motion:
 
 The standard CR3BP EOM including the Coriolis and centrifugal pseudo-forces:
 
-```
+```text
 ẍ = 2ẏ + x − (1−μ)(x+μ)/r₁³ − μ(x−1+μ)/r₂³
 ÿ = −2ẋ + y − (1−μ)y/r₁³ − μy/r₂³
 z̈ = −(1−μ)z/r₁³ − μz/r₂³
@@ -100,7 +100,7 @@ The Moon is synchronously locked, so its body frame co-rotates exactly with the 
 
 **Selenographic → CR3BP alignment:**
 
-```
+```text
 X_sel (→ Earth, lon=0)  =  −X_rot
 Y_sel (east, lon=90°)   =  +Y_rot
 Z_sel (north)           =  +Z_rot
@@ -134,7 +134,7 @@ Target: 1 200 km circular orbit in the Moon's orbital plane (i = 0°).
 1. Propagate with RK45 until trajectory crosses r = 7 571 km from Earth (inbound).
 2. At the crossing, compute circularisation ΔV in the Earth-centred inertial frame:
 
-```
+```text
 ΔV = √[(v_t − v_circ)² + v_r²]
 
 v_r    = radial speed (Earth-centred inertial)
@@ -173,7 +173,7 @@ Built with **Dash 4.3** + **dash-bootstrap-components** (DARKLY theme).
 
 ### Layout
 
-```
+```text
 Header: title | destination dropdown
 Progress bar + status text
 Left panel:  moon_map  (equirectangular heatmap)   [dcc.Graph]

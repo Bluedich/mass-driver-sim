@@ -159,14 +159,31 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
 
 
 # ── Dash app ──────────────────────────────────────────────────────────────────
+_INDEX_STRING = """<!DOCTYPE html>
+<html>
+<head>
+    {%metas%}
+    <title>{%title%}</title>
+    {%favicon%}
+    {%css%}
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script src="https://cdn.jsdelivr.net/npm/preline/dist/preline.js"></script>
+</head>
+<body>
+    {%app_entry%}
+    <footer>
+        {%config%}
+        {%scripts%}
+        {%renderer%}
+    </footer>
+</body>
+</html>"""
+
 app = dash.Dash(
     __name__,
-    external_scripts=[
-        {"src": "https://cdn.tailwindcss.com"},
-        {"src": "https://cdn.jsdelivr.net/npm/preline/dist/preline.js"},
-    ],
     title="Lunar Mass Driver Sim",
     update_title=None,
+    index_string=_INDEX_STRING,
 )
 
 DEST_OPTIONS = [{"label": d.label, "value": d.id} for d in ALL_DESTINATIONS.values()]
@@ -354,7 +371,10 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     className="p-5 overflow-y-auto",
-                    children=dcc.Markdown(_ARCH_MD, link_target="_blank"),
+                    children=html.Div(
+                        className="prose prose-invert prose-sm max-w-none",
+                        children=dcc.Markdown(_ARCH_MD, link_target="_blank"),
+                    ),
                 ),
             ],
         ),
@@ -542,6 +562,8 @@ def on_map_click(click_data, current_sel):
     prevent_initial_call=True,
 )
 def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
+    from dash import Patch
+
     if not dest_id:
         raise dash.exceptions.PreventUpdate
     cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
@@ -553,12 +575,22 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
     dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
     dest = ALL_DESTINATIONS[dest_id]
 
+    def _traj_patch(fig):
+        """Patch traces + axis ranges without touching the camera."""
+        p = Patch()
+        p["data"] = list(fig.data)
+        p["layout"]["scene"]["xaxis"]["range"] = list(fig.layout.scene.xaxis.range)
+        p["layout"]["scene"]["yaxis"]["range"] = list(fig.layout.scene.yaxis.range)
+        p["layout"]["scene"]["zaxis"]["range"] = list(fig.layout.scene.zaxis.range)
+        p["layout"]["title"]["text"] = fig.layout.title.text
+        return p
+
     if sel_cell is None:
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
-        traj_fig = (build_trajectory_view(trajs, dest.label)
-                    if trajs else build_empty_trajectory_view("No valid trajectories found"))
-        return traj_fig, moon_fig
+        if trajs:
+            return _traj_patch(build_trajectory_view(trajs, dest.label)), moon_fig
+        return build_empty_trajectory_view("No valid trajectories found"), moon_fig
 
     lat, lon = sel_cell["lat"], sel_cell["lon"]
     i = int(np.argmin(np.abs(LATS - lat)))
@@ -568,10 +600,8 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
                               selected_ij=(i, j))
     if cell_trajs is not None and cell_trajs[i, j] is not None:
         label = f"{dest.label} — Lat {lat:.0f}°, Lon {lon:.0f}°"
-        traj_fig = build_trajectory_view([cell_trajs[i, j]], label)
-    else:
-        traj_fig = build_empty_trajectory_view("No trajectory data for this site")
-    return traj_fig, moon_fig
+        return _traj_patch(build_trajectory_view([cell_trajs[i, j]], label)), moon_fig
+    return build_empty_trajectory_view("No trajectory data for this site"), moon_fig
 
 
 @app.callback(
