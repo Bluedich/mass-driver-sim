@@ -170,13 +170,31 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
         # processes exhausts memory before the work is done.
         n_workers = max(1, (os.cpu_count() or 4) // 2)
 
-    pairs        = [(lat, lon) for lat in lats for lon in lons]
-    n            = len(pairs)
-    total_props  = n * n_props
+    pairs = [(lat, lon) for lat in lats for lon in lons]
+    n     = len(pairs)
+
+    # Polar deduplication: lat = ±90° is a single physical point regardless of
+    # longitude.  For each polar latitude, compute propagations at only the lon
+    # closest to 0° (the sub-Earth reference) and broadcast the result to all
+    # other lons in that row.  This avoids redundant work while keeping the
+    # rectangular grid shape that the heatmap expects.
+    polar_primary = {}  # lat_value -> site_idx of the primary (computed) site
+    for site_idx, (lat, lon) in enumerate(pairs):
+        if abs(lat) == 90.0:
+            if lat not in polar_primary or abs(lon) < abs(pairs[polar_primary[lat]][1]):
+                polar_primary[lat] = site_idx
+
+    def _is_compute(site_idx, lat):
+        if abs(lat) < 90.0:
+            return True
+        return site_idx == polar_primary.get(lat)
+
+    n_compute   = sum(_is_compute(i, lat) for i, (lat, _) in enumerate(pairs))
+    total_props = n_compute * n_props
 
     logger.info(
-        "Starting grid: %d sites, %d workers, %d propagations/site (%d total)",
-        n, n_workers, n_props, total_props,
+        "Starting grid: %d cells (%d compute sites), %d workers, %d props/site (%d total)",
+        n, n_compute, n_workers, n_props, total_props,
     )
 
     # Per-site accumulators
@@ -189,6 +207,7 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     tasks = [
         (site_idx, lat, lon, el, az, v_du)
         for site_idx, (lat, lon) in enumerate(pairs)
+        if _is_compute(site_idx, lat)
         for el in elevations_use
         for az in azimuths_use
         for v_du in speeds_du_use
@@ -225,11 +244,20 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
                 dv_str = f"{dv:.3f} km/s" if np.isfinite(dv) else "unreachable"
                 logger.info(
                     "[%3d/%d] (%+5.1f°, %+6.1f°) → ΔV = %-16s  elapsed: %.1f s",
-                    sites_done[0], n, lat, lon, dv_str,
+                    sites_done[0], n_compute, lat, lon, dv_str,
                     time.perf_counter() - t0_grid,
                 )
                 if site_cb:
-                    site_cb(sites_done[0], n)
+                    site_cb(sites_done[0], n_compute)
+
+    # Broadcast polar primary results to all secondary polar sites.
+    # Secondary sites get the same ΔV (for heatmap colour) but params=None
+    # (no arrow, no trajectory) so only the primary site shows an arrow.
+    for plat, primary_idx in polar_primary.items():
+        dv_pole, _ = site_best[primary_idx]
+        for sec_idx, (slat, _) in enumerate(pairs):
+            if slat == plat and sec_idx != primary_idx:
+                site_best[sec_idx] = (dv_pole, None)
 
     total_elapsed = time.perf_counter() - t0_grid
     dv_flat     = [site_best[i][0] for i in range(n)]

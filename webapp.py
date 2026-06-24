@@ -17,7 +17,7 @@ from dash import dcc, html, Input, Output, State
 
 from destinations.earth_leo import ALL_DESTINATIONS
 from visualization.moon_map import build_moon_map, build_empty_moon_map
-from visualization.trajectories import build_trajectory_view, build_empty_trajectory_view, scene_bounds
+from visualization.trajectories import build_trajectory_view, build_empty_trajectory_view, scene_bounds, fixed_scene_bounds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +40,11 @@ except FileNotFoundError:
 GRID_LAT_STEP = 30
 GRID_LON_STEP = 30
 
-LATS = np.arange(-60, 90, GRID_LAT_STEP, dtype=float)
-LONS = np.arange(-150, 180, GRID_LON_STEP, dtype=float)
+# Poles are included as single representative sites (all lons are the same
+# physical point at ±90°, so only one propagation set is run per pole).
+# Far-side left (lon < -90°) is excluded for now; only the right side is tested.
+LATS = np.array([-90, -60, -30,  0, 30, 60, 90], dtype=float)
+LONS = np.array([-90, -60, -30,  0, 30, 60, 90, 120, 150, 180], dtype=float)
 
 # ── Shared computation state ──────────────────────────────────────────────────
 _compute_state = {
@@ -71,7 +74,8 @@ def _make_sweep_arrays(n_az, n_el, max_el, n_sp):
 
 
 def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
-    return f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}_sp{int(n_sp)}_ins{insertion_mode}"
+    return (f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}"
+            f"_sp{int(n_sp)}_ins{insertion_mode}_g{len(LATS)}x{len(LONS)}")
 
 
 def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
@@ -88,9 +92,11 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
         _compute_state["dest_id"]   = dest_id
         _compute_state["cache_key"] = cache_key
 
-    n_sites = len(LATS) * len(LONS)
-    logger.info("Computation requested for '%s' (%d×%d = %d sites)",
-                dest.label, len(LATS), len(LONS), n_sites)
+    n_polar_lats    = sum(1 for lat in LATS if abs(lat) == 90.0)
+    n_compute_sites = (len(LATS) - n_polar_lats) * len(LONS) + n_polar_lats
+    n_sites         = len(LATS) * len(LONS)   # total cells (includes secondary polar)
+    logger.info("Computation requested for '%s' (%d×%d = %d cells, %d compute sites)",
+                dest.label, len(LATS), len(LONS), n_sites, n_compute_sites)
 
     if os.path.exists(cache_path):
         logger.info("Cache hit: %s — loading from disk", cache_path)
@@ -115,12 +121,12 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
     from physics.optimizer import compute_grid
 
     azimuths, elevations, speeds_kms = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
-    n_props_total = n_sites * len(azimuths) * len(elevations) * len(speeds_kms)
+    n_props_total = n_compute_sites * len(azimuths) * len(elevations) * len(speeds_kms)
     with _lock:
         _compute_state["props_done"]  = 0
         _compute_state["props_total"] = n_props_total
         _compute_state["sites_done"]  = 0
-        _compute_state["sites_total"] = n_sites
+        _compute_state["sites_total"] = n_compute_sites
         _compute_state["t_start"]     = time.perf_counter()
 
     def _progress(props_done, props_total):
@@ -497,7 +503,7 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
         dest = ALL_DESTINATIONS[dest_id]
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
-        traj_fig = (build_trajectory_view(trajs, dest.label)
+        traj_fig = (build_trajectory_view(trajs, dest.label, uirevision=cache_key)
                     if trajs else build_empty_trajectory_view("No valid trajectories found"))
         min_dv = np.nanmin(dv_grid[np.isfinite(dv_grid)]) if np.any(np.isfinite(dv_grid)) else 0
         return (moon_fig, traj_fig, {"width": "100%"}, _BAR_SHOWN, True,
@@ -562,8 +568,6 @@ def on_map_click(click_data, current_sel):
     prevent_initial_call=True,
 )
 def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
-    from dash import Patch
-
     if not dest_id:
         raise dash.exceptions.PreventUpdate
     cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
@@ -575,21 +579,11 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
     dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
     dest = ALL_DESTINATIONS[dest_id]
 
-    def _traj_patch(fig):
-        """Patch traces + axis ranges without touching the camera."""
-        p = Patch()
-        p["data"] = list(fig.data)
-        p["layout"]["scene"]["xaxis"]["range"] = list(fig.layout.scene.xaxis.range)
-        p["layout"]["scene"]["yaxis"]["range"] = list(fig.layout.scene.yaxis.range)
-        p["layout"]["scene"]["zaxis"]["range"] = list(fig.layout.scene.zaxis.range)
-        p["layout"]["title"]["text"] = fig.layout.title.text
-        return p
-
     if sel_cell is None:
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
         if trajs:
-            return _traj_patch(build_trajectory_view(trajs, dest.label)), moon_fig
+            return build_trajectory_view(trajs, dest.label, uirevision=cache_key), moon_fig
         return build_empty_trajectory_view("No valid trajectories found"), moon_fig
 
     lat, lon = sel_cell["lat"], sel_cell["lon"]
@@ -600,7 +594,7 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
                               selected_ij=(i, j))
     if cell_trajs is not None and cell_trajs[i, j] is not None:
         label = f"{dest.label} — Lat {lat:.0f}°, Lon {lon:.0f}°"
-        return _traj_patch(build_trajectory_view([cell_trajs[i, j]], label)), moon_fig
+        return build_trajectory_view([cell_trajs[i, j]], label, uirevision=cache_key), moon_fig
     return build_empty_trajectory_view("No trajectory data for this site"), moon_fig
 
 
@@ -630,19 +624,7 @@ def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, 
     if not result or result[6] != cache_key:
         raise dash.exceptions.PreventUpdate
 
-    _, trajs, _, _, _, _, _, cell_trajs = result
-
-    traj_list = trajs
-    if sel_cell is not None and cell_trajs is not None:
-        i = int(np.argmin(np.abs(LATS - sel_cell["lat"])))
-        j = int(np.argmin(np.abs(LONS - sel_cell["lon"])))
-        if cell_trajs[i, j] is not None:
-            traj_list = [cell_trajs[i, j]]
-
-    if not traj_list:
-        raise dash.exceptions.PreventUpdate
-
-    cx, cy, cz, half = scene_bounds(traj_list)
+    cx, cy, cz, half = fixed_scene_bounds()
 
     if ctx.triggered_id == "center-moon-btn":
         tx = (1 - MU) * _DU_KM

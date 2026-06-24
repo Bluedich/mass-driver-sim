@@ -65,7 +65,26 @@ def scene_bounds(trajectories):
     return cx, cy, cz, half
 
 
-def build_trajectory_view(trajectories, destination_label=""):
+def _init_fixed_bounds():
+    """Fixed scene bounds spanning L3→L2 in X and L4/L5 in Y, with 15% buffer."""
+    lp = lagrange_points()
+    xs = [p[0] * DU_KM for p in lp]
+    ys = [p[1] * DU_KM for p in lp]
+    cx   = (min(xs) + max(xs)) / 2
+    cy   = (min(ys) + max(ys)) / 2
+    half = max(max(xs) - min(xs), max(ys) - min(ys)) / 2 * 1.15
+    return cx, cy, 0.0, half
+
+
+_FIXED_BOUNDS = _init_fixed_bounds()
+
+
+def fixed_scene_bounds():
+    """Return (cx, cy, cz, half) in km — fixed across all trajectory views."""
+    return _FIXED_BOUNDS
+
+
+def build_trajectory_view(trajectories, destination_label="", uirevision=None):
     """
     Build a Plotly 3-D figure showing trajectories in the CR3BP rotating frame.
 
@@ -186,7 +205,7 @@ def build_trajectory_view(trajectories, destination_label=""):
     ))
 
     # ── Layout ────────────────────────────────────────────────────────────────
-    cx, cy, cz, half = scene_bounds(trajectories)
+    cx, cy, cz, half = _FIXED_BOUNDS
     x_range = [cx - half, cx + half]
     y_range = [cy - half, cy + half]
     z_range = [cz - half, cz + half]
@@ -203,16 +222,18 @@ def build_trajectory_view(trajectories, destination_label=""):
                        gridcolor="#333", color="#aaa", range=z_range),
             bgcolor="#111",
             aspectmode="cube",
-            # Plotly 3D: screen_right = cross(up, forward) where forward=normalize(eye-center).
-            # screen_right = (eye.y, -eye.x, 0)/|eye|.
-            # east (+y) on screen-right requires eye.x < 0;
-            # Moon (high +x) right of Earth (low x) requires eye.y > 0.
-            # eye=(-0.8, 1.2, 0.8): screen_right=(0.73, 0.49, 0) — both satisfied.
-            camera=dict(eye=dict(x=-0.8, y=1.2, z=0.8)),
+            # Plotly uses look_at: zaxis = normalize(eye-center), xaxis = normalize(cross(up, zaxis)).
+            # With up=(0,0,1): screen_right = normalize(-eye.y, eye.x, 0).
+            # east (+y) on screen-right requires eye.x > 0;
+            # Moon (high +x) right of Earth requires eye.y < 0.
+            # eye=(0.8, -1.2, 0.8): screen_right=(0.83, 0.55, 0) — both satisfied.
+            camera=dict(eye=dict(x=0.8, y=-1.2, z=0.8)),
+            uirevision=uirevision,
         ),
         paper_bgcolor="#111",
         margin=dict(l=0, r=0, t=40, b=0),
         height=560,
+        uirevision=uirevision,
     )
 
     return fig
