@@ -286,7 +286,7 @@ app.layout = html.Div(
             html.Div(className="flex flex-col gap-1", children=[
                 html.Label("Azimuths", htmlFor="n-azimuths",
                            className="text-gray-400 text-xs font-medium"),
-                dcc.Input(id="n-azimuths", type="number", value=8, min=2, max=64, step=2,
+                dcc.Input(id="n-azimuths", type="number", value=8, min=2, max=1440, step=2,
                           debounce=True,
                           className=(
                               "w-20 bg-neutral-800 border border-neutral-700 rounded "
@@ -319,7 +319,7 @@ app.layout = html.Div(
             html.Div(className="flex flex-col gap-1", children=[
                 html.Label("Speed candidates", htmlFor="n-speeds",
                            className="text-gray-400 text-xs font-medium"),
-                dcc.Input(id="n-speeds", type="number", value=10, min=3, max=60, step=1,
+                dcc.Input(id="n-speeds", type="number", value=10, min=3, max=1000, step=1,
                           debounce=True,
                           className=(
                               "w-20 bg-neutral-800 border border-neutral-700 rounded "
