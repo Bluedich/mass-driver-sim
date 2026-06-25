@@ -31,6 +31,9 @@ from .cr3bp import VU_KMS
 N_AZ = 8
 AZIMUTHS = np.linspace(0, 360, N_AZ, endpoint=False)
 
+MAX_N_AZ      = 1440
+MAX_AZIMUTHS  = np.linspace(0, 360, MAX_N_AZ, endpoint=False)
+
 # Elevation angles (degrees above horizontal)
 ELEVATIONS = np.array([0.0, 5.0])
 
@@ -39,6 +42,9 @@ ELEVATIONS = np.array([0.0, 5.0])
 # include finer sampling there plus broader range for robustness.
 SPEEDS_KMS = np.array([2.2, 2.4, 2.5, 2.55, 2.59, 2.63, 2.68, 2.72, 2.78, 2.9])
 SPEEDS_DU  = speed_du_per_tu(SPEEDS_KMS)   # DU/TU
+
+MAX_SPEEDS_KMS = np.linspace(2.2, 2.9, 1000)
+MAX_SPEEDS_DU  = speed_du_per_tu(MAX_SPEEDS_KMS)
 
 N_PROPS = len(ELEVATIONS) * N_AZ * len(SPEEDS_KMS)   # propagations per site (160)
 

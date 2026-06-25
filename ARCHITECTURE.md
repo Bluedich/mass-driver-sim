@@ -82,15 +82,24 @@ z̈ = −(1−μ)z/r₁³ − μz/r₂³
 
 `propagate()` calls `scipy.integrate.solve_ivp` with `method="RK45"`, `rtol=1e-9`, `atol=1e-11`, `max_step=0.05 TU` (~45 min). Each trajectory is propagated for up to `T_MAX_TU = 8 TU` (~35 days) or until a terminal event fires.
 
-### Terminal Events
+### Stopping Conditions
 
-| Event | Fires when | Purpose |
+Integration halts at the **first** of these four terminal events:
+
+| Event | Fires when | Outcome |
 |---|---|---|
-| `make_target_altitude_event()` | r_Earth = R_target (inbound) | LEO arrival detection |
-| `make_moon_impact_event()` | r_Moon ≤ R_Moon | Safety stop |
-| `make_earth_impact_event()` | r_Earth ≤ R_Earth | Safety stop |
-| `make_escape_event(r_max=3.5)` | r_bary > 3.5 DU | Trajectory left the system |
-| `make_earth_periapsis_event()` | ṙ_Earth = 0 (inbound→outbound) | Used for periapsis sampling |
+| `make_target_altitude_event()` | r_Earth crosses R_target inbound | **Valid** — ΔV computed at this point |
+| `make_moon_impact_event()` | r_Moon ≤ 1 737.4 km | **Miss** — ΔV = ∞ |
+| `make_earth_impact_event()` | r_Earth ≤ 6 371 km | **Miss** — ΔV = ∞ |
+| `make_escape_event(r_max=3.5)` | r_bary > 3.5 DU (≈ 1 345 000 km) | **Miss** — craft left the system |
+
+If none of the four events fire within 35 days the integrator also stops and the trajectory is marked unreachable (ΔV = ∞).
+
+`make_earth_periapsis_event()` is a separate utility event not used in the grid sweep; it detects periapsis (ṙ_Earth = 0) for one-off analysis.
+
+### Acceptance Criterion
+
+A trajectory is valid **only** if it crosses the shell at r_Earth = R_target = **7 571 km** while moving inbound. There is no tolerance band. `solve_ivp` uses dense output interpolation to locate the crossing precisely, so the state returned is at the exact crossing point, not at the nearest integration step.
 
 ---
 
@@ -131,18 +140,17 @@ Adding a new destination (L1 halo, DRO, etc.) means subclassing `Destination`, i
 
 Target: 1 200 km circular orbit in the Moon's orbital plane (i = 0°).
 
-1. Propagate with RK45 until trajectory crosses r = 7 571 km from Earth (inbound).
-2. At the crossing, compute circularisation ΔV in the Earth-centred inertial frame:
+1. Propagate with RK45. The integrator stops as soon as the trajectory crosses r = 7 571 km from Earth while moving inbound (see Acceptance Criterion above). If the trajectory reaches periapsis above 7 571 km and turns back outward without ever crossing that shell, it is a miss (ΔV = ∞).
+2. At the exact crossing point, compute the circularisation ΔV in the Earth-centred inertial frame (rotating frame velocity corrected by Ω × r):
 
 ```text
-ΔV = √[(v_t − v_circ)² + v_r²]
+ΔV = |v_inertial − v_target|
 
-v_r    = radial speed (Earth-centred inertial)
-v_t    = tangential speed
-v_circ = √(μ_Earth / r)   ≈ 7.26 km/s at 1 200 km
+v_target = v_circ × φ̂    (tangential unit vector, prograde or retrograde)
+v_circ   = √(μ_Earth / r) ≈ 7.26 km/s at 1 200 km
 ```
 
-The optimiser naturally drives `v_r → 0` (periapsis at target altitude), minimising ΔV.
+Out-of-plane velocity (vz) is fully included in the ΔV cost. The insertion mode (prograde / retrograde / both) is configurable; "both" takes the cheaper of the two. The optimiser naturally drives periapsis toward the target altitude, which minimises ΔV by making the radial component near zero at the crossing.
 
 ---
 
