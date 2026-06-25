@@ -58,7 +58,8 @@ def jacobi(state):
     return 2*omega - v2
 
 
-def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05):
+def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05,
+              t_eval=None):
     """
     Integrate CR3BP from state0 over t_span (non-dimensional time).
 
@@ -72,6 +73,8 @@ def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05)
         if event.terminal=True.
     rtol, atol : integrator tolerances.
     max_step : maximum step size (TU). Default 0.05 ≈ 45 min.
+    t_eval : array-like or None.
+        Times at which to store the solution (passed to solve_ivp).
 
     Returns
     -------
@@ -87,6 +90,7 @@ def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05)
         atol=atol,
         max_step=max_step,
         dense_output=False,
+        t_eval=t_eval,
     )
     return sol
 

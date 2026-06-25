@@ -186,6 +186,22 @@ def build_trajectory_view(trajectories, destination_label="", uirevision=None):
                 showlegend=False,
             ))
 
+    # ── Destination halo orbit ring ───────────────────────────────────────────
+    for traj in trajectories:
+        if "halo_x" not in traj:
+            continue
+        hx = np.append(traj["halo_x"], traj["halo_x"][0]) * DU_KM
+        hy = np.append(traj["halo_y"], traj["halo_y"][0]) * DU_KM
+        hz = np.append(traj["halo_z"], traj["halo_z"][0]) * DU_KM
+        fig.add_trace(go.Scatter3d(
+            x=hx, y=hy, z=hz,
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.6)", width=1),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        break   # one halo ring per view
+
     # ── Lagrange points ───────────────────────────────────────────────────────
     lp_list = lagrange_points()
     lp_x = [p[0] * DU_KM for p in lp_list]
