@@ -20,6 +20,7 @@ Performance design
 import os
 import logging
 import time
+import itertools
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,10 @@ def _prop_worker(args):
         f"{dv_nd * VU_KMS:.3f} km/s" if np.isfinite(dv_nd) else "∞",
         elapsed * 1e3,
     )
-    return site_idx, el, az, v_du, dv_nd, traj, elapsed
+    # Only the parent's best-per-site trajectory is ever read, and only when
+    # dv_nd is finite — null the trajectory for misses so we don't pickle a
+    # large array back from every unreachable propagation.
+    return site_idx, el, az, v_du, dv_nd, (traj if np.isfinite(dv_nd) else None), elapsed
 
 
 def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_workers=None,
@@ -163,7 +167,7 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     dv_grid : 2-D array shape (len(lats), len(lons)), ΔV in km/s
     best_trajectories : list of representative trajectory dicts
     """
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
 
     azimuths_use   = AZIMUTHS   if azimuths   is None else np.asarray(azimuths,   dtype=float)
     elevations_use = ELEVATIONS if elevations  is None else np.asarray(elevations, dtype=float)
@@ -210,51 +214,72 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     sites_done   = [0]
     t0_grid      = time.perf_counter()
 
-    tasks = [
-        (site_idx, lat, lon, el, az, v_du)
-        for site_idx, (lat, lon) in enumerate(pairs)
-        if _is_compute(site_idx, lat)
-        for el in elevations_use
-        for az in azimuths_use
-        for v_du in speeds_du_use
-    ]
+    # Lazy task stream — one task per propagation, never materialised as a list.
+    # For large sweeps (e.g. 1440 az × 1000 speeds × N sites) the full list would
+    # be tens of millions of tuples, and submitting them all at once would create
+    # an equal number of Future/_WorkItem objects in the parent before any result
+    # is consumed — exhausting memory and stalling the run.
+    def _task_iter():
+        for site_idx, (lat, lon) in enumerate(pairs):
+            if not _is_compute(site_idx, lat):
+                continue
+            for el in elevations_use:
+                for az in azimuths_use:
+                    for v_du in speeds_du_use:
+                        yield (site_idx, lat, lon, el, az, v_du)
+
+    def _handle_result(fut):
+        site_idx, el, az, v_du, dv_nd, traj, prop_elapsed = fut.result()
+        lat, lon = pairs[site_idx]
+
+        if np.isfinite(dv_nd):
+            dv_kms = dv_nd * VU_KMS
+            if dv_kms < site_best[site_idx][0]:
+                site_best[site_idx] = (dv_kms, {
+                    "azimuth_deg":   az,
+                    "elevation_deg": el,
+                    "speed_kms":     v_du * VU_KMS,
+                    "trajectory":    traj,
+                })
+
+        props_done[0] += 1
+        if progress_cb:
+            progress_cb(props_done[0], total_props)
+
+        site_counts[site_idx] += 1
+        if site_counts[site_idx] == n_props:
+            sites_done[0] += 1
+            dv, params = site_best[site_idx]
+            dv_str = f"{dv:.3f} km/s" if np.isfinite(dv) else "unreachable"
+            logger.info(
+                "[%3d/%d] (%+5.1f°, %+6.1f°) → ΔV = %-16s  elapsed: %.1f s",
+                sites_done[0], n_compute, lat, lon, dv_str,
+                time.perf_counter() - t0_grid,
+            )
+            if site_cb:
+                site_cb(sites_done[0], n_compute)
+
+    # Bounded sliding window: keep at most ~2× n_workers futures in flight, so
+    # parent memory stays O(n_workers) regardless of total task count.  Seed the
+    # window, then submit one new task for each completed one until drained.
+    max_inflight = 2 * n_workers
 
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_pool_init,
         initargs=(destination,),
     ) as pool:
-        futures = {pool.submit(_prop_worker, task): task for task in tasks}
-        for fut in as_completed(futures):
-            site_idx, el, az, v_du, dv_nd, traj, prop_elapsed = fut.result()
-            lat, lon = pairs[site_idx]
+        task_gen = _task_iter()
+        inflight = {pool.submit(_prop_worker, task)
+                    for task in itertools.islice(task_gen, max_inflight)}
 
-            if np.isfinite(dv_nd):
-                dv_kms = dv_nd * VU_KMS
-                if dv_kms < site_best[site_idx][0]:
-                    site_best[site_idx] = (dv_kms, {
-                        "azimuth_deg":   az,
-                        "elevation_deg": el,
-                        "speed_kms":     v_du * VU_KMS,
-                        "trajectory":    traj,
-                    })
-
-            props_done[0] += 1
-            if progress_cb:
-                progress_cb(props_done[0], total_props)
-
-            site_counts[site_idx] += 1
-            if site_counts[site_idx] == n_props:
-                sites_done[0] += 1
-                dv, params = site_best[site_idx]
-                dv_str = f"{dv:.3f} km/s" if np.isfinite(dv) else "unreachable"
-                logger.info(
-                    "[%3d/%d] (%+5.1f°, %+6.1f°) → ΔV = %-16s  elapsed: %.1f s",
-                    sites_done[0], n_compute, lat, lon, dv_str,
-                    time.perf_counter() - t0_grid,
-                )
-                if site_cb:
-                    site_cb(sites_done[0], n_compute)
+        while inflight:
+            done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in done:
+                _handle_result(fut)
+                nxt = next(task_gen, None)
+                if nxt is not None:
+                    inflight.add(pool.submit(_prop_worker, nxt))
 
     # Broadcast polar primary results to all secondary polar sites.
     # Secondary sites get the same ΔV (for heatmap colour) but params=None
