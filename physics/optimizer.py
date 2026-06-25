@@ -20,7 +20,6 @@ Performance design
 import os
 import logging
 import time
-import itertools
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -48,6 +47,10 @@ MAX_SPEEDS_KMS = np.linspace(2.2, 2.9, 1000)
 MAX_SPEEDS_DU  = speed_du_per_tu(MAX_SPEEDS_KMS)
 
 N_PROPS = len(ELEVATIONS) * N_AZ * len(SPEEDS_KMS)   # propagations per site (160)
+
+# Resilience tuning for the process pool (see compute_grid).
+MAX_TASKS_PER_CHILD = 1000   # recycle each worker after N props → bounds memory growth
+MAX_TASK_ATTEMPTS   = 5      # give up on a propagation after this many pool-death cycles
 
 
 def compute_site_deltav(lat_deg, lon_deg, destination):
@@ -168,6 +171,7 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     best_trajectories : list of representative trajectory dicts
     """
     from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
+    from concurrent.futures.process import BrokenProcessPool
 
     azimuths_use   = AZIMUTHS   if azimuths   is None else np.asarray(azimuths,   dtype=float)
     elevations_use = ELEVATIONS if elevations  is None else np.asarray(elevations, dtype=float)
@@ -228,8 +232,7 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
                     for v_du in speeds_du_use:
                         yield (site_idx, lat, lon, el, az, v_du)
 
-    def _handle_result(fut):
-        site_idx, el, az, v_du, dv_nd, traj, prop_elapsed = fut.result()
+    def _record(site_idx, el, az, v_du, dv_nd, traj):
         lat, lon = pairs[site_idx]
 
         if np.isfinite(dv_nd):
@@ -259,27 +262,103 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
             if site_cb:
                 site_cb(sites_done[0], n_compute)
 
+    def _handle_result(fut, task):
+        try:
+            res = fut.result()
+        except BrokenProcessPool:
+            raise                       # pool-wide failure → caught by recovery loop
+        except Exception as exc:        # one bad task → mark its point unreachable
+            logger.warning("Propagation for site %d failed: %s — marking unreachable",
+                           task[0], exc)
+            _record(task[0], task[3], task[4], task[5], np.inf, None)
+            return
+        _record(*res[:6])               # res = (site_idx, el, az, v_du, dv_nd, traj, elapsed)
+
     # Bounded sliding window: keep at most ~2× n_workers futures in flight, so
     # parent memory stays O(n_workers) regardless of total task count.  Seed the
     # window, then submit one new task for each completed one until drained.
+    #
+    # Resilience: a single worker dying abruptly poisons the whole
+    # ProcessPoolExecutor (every outstanding future raises BrokenProcessPool).
+    # Rather than lose the entire run, we catch that, rebuild the pool, and
+    # resubmit only the propagations that were still in flight.  Workers are also
+    # recycled after MAX_TASKS_PER_CHILD tasks so accumulated memory is released
+    # before it can OOM-kill a worker in the first place.  `attempts` caps
+    # retries so a genuine poison-state is retired as unreachable instead of
+    # looping forever.
     max_inflight = 2 * n_workers
+    task_gen = _task_iter()
+    pending  = []                       # tasks awaiting resubmission after a recovery
+    attempts = {}                       # task tuple -> times submitted
 
-    with ProcessPoolExecutor(
-        max_workers=n_workers,
-        initializer=_pool_init,
-        initargs=(destination,),
-    ) as pool:
-        task_gen = _task_iter()
-        inflight = {pool.submit(_prop_worker, task)
-                    for task in itertools.islice(task_gen, max_inflight)}
+    def _next_task():
+        return pending.pop() if pending else next(task_gen, None)
 
-        while inflight:
-            done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
-            for fut in done:
-                _handle_result(fut)
-                nxt = next(task_gen, None)
-                if nxt is not None:
-                    inflight.add(pool.submit(_prop_worker, nxt))
+    def _new_pool():
+        return ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_pool_init,
+            initargs=(destination,),
+            max_tasks_per_child=MAX_TASKS_PER_CHILD,
+        )
+
+    def _submit(pool, future_to_task, t):
+        attempts[t] = attempts.get(t, 0) + 1
+        future_to_task[pool.submit(_prop_worker, t)] = t
+
+    while True:                         # recovery loop
+        pool = _new_pool()
+        future_to_task = {}
+        # A task pulled from the stream but not yet safely submitted, and not yet
+        # recorded — held here so that whichever pool operation raises
+        # BrokenProcessPool (submit during seeding, _handle_result, or the
+        # replacement submit), the exact in-hand task is recovered without
+        # double-counting an already-recorded one.
+        orphan = None
+        try:
+            for _ in range(max_inflight):          # seed the in-flight window
+                t = _next_task()
+                if t is None:
+                    break
+                orphan = t
+                _submit(pool, future_to_task, t)   # may raise BrokenProcessPool
+                orphan = None
+
+            while future_to_task:
+                done, _ = wait(set(future_to_task), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    task = future_to_task.pop(fut)
+                    orphan = task                   # not recorded until _handle_result returns
+                    _handle_result(fut, task)       # may raise BrokenProcessPool
+                    orphan = None
+                    nxt = _next_task()
+                    if nxt is not None:
+                        orphan = nxt
+                        _submit(pool, future_to_task, nxt)   # may raise BrokenProcessPool
+                        orphan = None
+            break                                   # drained cleanly → done
+
+        except BrokenProcessPool:
+            # Every future still tracked is unfinished (the dead pool can no
+            # longer complete them); `orphan`, if set, is the one task that was
+            # mid-flight when the raise happened and isn't tracked.
+            outstanding = list(future_to_task.values())
+            if orphan is not None:
+                outstanding.append(orphan)
+            logger.warning("Worker pool broke — recovering %d outstanding propagation(s)",
+                           len(outstanding))
+            for t in outstanding:
+                if attempts.get(t, 0) >= MAX_TASK_ATTEMPTS:
+                    logger.warning(
+                        "Site %d prop (az=%.0f° el=%.0f° v=%.3f km/s) failed %d× — unreachable",
+                        t[0], t[4], t[3], t[5] * VU_KMS, attempts[t],
+                    )
+                    _record(t[0], t[3], t[4], t[5], np.inf, None)  # count as a miss so the site finishes
+                else:
+                    pending.append(t)               # retry in the next pool
+            # loop continues → builds a fresh pool and resumes
+        finally:
+            pool.shutdown(wait=False)               # don't block on dead/recycled workers
 
     # Broadcast polar primary results to all secondary polar sites.
     # Secondary sites get the same ΔV (for heatmap colour) but params=None

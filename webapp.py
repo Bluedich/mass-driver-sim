@@ -60,6 +60,7 @@ _compute_state = {
     "result":      None,
     "dest_id":     None,
     "cache_key":   None,
+    "error":       None,
 }
 _lock = threading.Lock()
 
@@ -73,6 +74,16 @@ def _make_sweep_arrays(n_az, n_el, max_el, n_sp):
         elevations = np.linspace(0.0, float(max_el), int(n_el))
     speeds_kms = np.linspace(2.2, 2.9, int(n_sp))
     return azimuths, elevations, speeds_kms
+
+
+def _format_eta(seconds):
+    """Human-readable remaining-time string (e.g. '45 s', '3 min 20 s', '1 h 5 min')."""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min {seconds % 60} s"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60} min"
 
 
 def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
@@ -93,6 +104,7 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
         _compute_state["result"]    = None
         _compute_state["dest_id"]   = dest_id
         _compute_state["cache_key"] = cache_key
+        _compute_state["error"]     = None
 
     n_polar_lats    = sum(1 for lat in LATS if abs(lat) == 90.0)
     n_compute_sites = (len(LATS) - n_polar_lats) * len(LONS) + n_polar_lats
@@ -141,14 +153,22 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
             _compute_state["sites_done"] = sites_done
 
     t0 = time.perf_counter()
-    dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs = compute_grid(
-        LATS, LONS, dest,
-        progress_cb=_progress,
-        site_cb=_site_done,
-        azimuths=azimuths,
-        elevations=elevations,
-        speeds_kms=speeds_kms,
-    )
+    try:
+        dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs = compute_grid(
+            LATS, LONS, dest,
+            progress_cb=_progress,
+            site_cb=_site_done,
+            azimuths=azimuths,
+            elevations=elevations,
+            speeds_kms=speeds_kms,
+        )
+    except Exception as exc:
+        logger.exception("Grid computation failed")
+        with _lock:
+            _compute_state["running"]  = False
+            _compute_state["progress"] = 0.0
+            _compute_state["error"]    = str(exc)
+        return
     logger.info("Grid computation finished in %.1f s", time.perf_counter() - t0)
 
     t_save = time.perf_counter()
@@ -497,8 +517,16 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
         sites_total = _compute_state["sites_total"]
         t_start     = _compute_state["t_start"]
         result      = _compute_state.get("result")
+        error       = _compute_state.get("error")
 
     pct = int(progress * 100)
+
+    if error:
+        return (build_empty_moon_map("Computation failed"),
+                build_empty_trajectory_view("Computation failed"),
+                {"width": "0%"}, _BAR_HIDDEN, True,
+                html.Span(f"Computation failed: {error}", className="text-red-400"),
+                "Calculate", False)
 
     if result and result[6] == cache_key:
         dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
@@ -513,9 +541,13 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
 
     elapsed = time.perf_counter() - t_start if t_start else 0
     if props_total:
+        eta = ""
+        if props_done > 0:
+            remaining = elapsed / props_done * (props_total - props_done)
+            eta = f"  ·  ~{_format_eta(remaining)} left"
         status = (f"Computing…  {props_done:,} / {props_total:,} propagations"
                   f"  ·  {sites_done} / {sites_total} sites"
-                  f"  ·  {elapsed:.0f} s")
+                  f"  ·  {elapsed:.0f} s{eta}")
     else:
         status = "Computing…"
 
