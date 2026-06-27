@@ -84,7 +84,8 @@ def fixed_scene_bounds():
     return _FIXED_BOUNDS
 
 
-def build_trajectory_view(trajectories, destination_label="", uirevision=None):
+def build_trajectory_view(trajectories, destination_label="", uirevision=None,
+                          target_orbits=None, selected_orbit_ids=None):
     """
     Build a Plotly 3-D figure showing trajectories in the CR3BP rotating frame.
 
@@ -94,11 +95,18 @@ def build_trajectory_view(trajectories, destination_label="", uirevision=None):
         't', 'x', 'y', 'z' : arrays (non-dim DU)
         'burns' : list of {'x','y','z','dv_kms'}
     destination_label : str
+    target_orbits : list of dicts or None
+        Destination insertion orbit(s) — each {'id','label','x','y','z'} in
+        non-dim DU.  All are drawn; those whose id is in selected_orbit_ids are
+        highlighted.
+    selected_orbit_ids : set/iterable of str or None
+        Orbit ids the trajectory burns actually insert into.
 
     Returns
     -------
     fig : plotly.graph_objects.Figure
     """
+    selected_orbit_ids = set(selected_orbit_ids or ())
     fig = go.Figure()
 
     # ── Earth sphere ──────────────────────────────────────────────────────────
@@ -186,21 +194,23 @@ def build_trajectory_view(trajectories, destination_label="", uirevision=None):
                 showlegend=False,
             ))
 
-    # ── Destination halo orbit ring ───────────────────────────────────────────
-    for traj in trajectories:
-        if "halo_x" not in traj:
-            continue
-        hx = np.append(traj["halo_x"], traj["halo_x"][0]) * DU_KM
-        hy = np.append(traj["halo_y"], traj["halo_y"][0]) * DU_KM
-        hz = np.append(traj["halo_z"], traj["halo_z"][0]) * DU_KM
+    # ── Destination insertion orbit(s) ────────────────────────────────────────
+    # Draw every variation; highlight the one(s) the burns actually target.
+    for orbit in (target_orbits or []):
+        ox = np.append(orbit["x"], orbit["x"][0]) * DU_KM
+        oy = np.append(orbit["y"], orbit["y"][0]) * DU_KM
+        oz = np.append(orbit["z"], orbit["z"][0]) * DU_KM
+        chosen = orbit["id"] in selected_orbit_ids
+        line = (dict(color="rgba(255,255,255,0.9)", width=3) if chosen
+                else dict(color="rgba(255,255,255,0.35)", width=1))
         fig.add_trace(go.Scatter3d(
-            x=hx, y=hy, z=hz,
+            x=ox, y=oy, z=oz,
             mode="lines",
-            line=dict(color="rgba(255,255,255,0.6)", width=1),
-            hoverinfo="skip",
+            line=line,
+            name=orbit["label"],
+            hovertemplate=f"{orbit['label']}<extra></extra>",
             showlegend=False,
         ))
-        break   # one halo ring per view
 
     # ── Lagrange points ───────────────────────────────────────────────────────
     lp_list = lagrange_points()

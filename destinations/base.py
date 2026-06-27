@@ -33,8 +33,25 @@ class Destination(ABC):
             Return np.inf if destination is unreachable.
         trajectory : dict or None
             Keys: 't', 'x', 'y', 'z' (arrays, non-dim), 'burns' (list of dicts
-            with keys 'x','y','z','dv_kms').
+            with keys 'x','y','z','dv_kms').  A burn may additionally carry an
+            'orbit_id' naming which target_orbits() entry it inserts into.
         """
+
+    def target_orbits(self):
+        """
+        Insertion orbit(s) for this destination as closed 3-D curves in the
+        CR3BP rotating frame (non-dim DU), for visualisation.  Independent of
+        any particular trajectory.
+
+        Returns
+        -------
+        list of dict, each with keys:
+            'id'    : str        stable id; matched against burn['orbit_id']
+            'label' : str        shown on hover
+            'x','y','z' : 1-D arrays (non-dim DU)
+        Empty list if the destination exposes no displayable orbit.
+        """
+        return []
 
     def compute_grid(self, lats, lons, progress_cb=None, n_workers=4):
         """

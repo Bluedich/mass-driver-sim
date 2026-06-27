@@ -93,13 +93,25 @@ class EarthLEO1200(Destination):
         dv_nd, dv_kms = _circularization_deltav(state_cross, mode=self.insertion_mode)
 
         traj["burns"].append({
-            "x":      state_cross[0],
-            "y":      state_cross[1],
-            "z":      state_cross[2],
-            "dv_kms": dv_kms,
+            "x":        state_cross[0],
+            "y":        state_cross[1],
+            "z":        state_cross[2],
+            "dv_kms":   dv_kms,
+            "orbit_id": "leo_1200",
         })
 
         return dv_nd, traj
+
+    def target_orbits(self):
+        """Single 1 200 km circle in the z=0 plane centred on Earth."""
+        theta = np.linspace(0.0, 2.0 * np.pi, 120)
+        return [{
+            "id":    "leo_1200",
+            "label": "1 200 km circular",
+            "x":     -MU + R_TARGET_DU * np.cos(theta),
+            "y":     R_TARGET_DU * np.sin(theta),
+            "z":     np.zeros_like(theta),
+        }]
 
 
 def _circularization_deltav(state, mode="prograde"):

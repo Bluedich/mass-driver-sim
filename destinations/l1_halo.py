@@ -182,21 +182,30 @@ class L1Halo(Destination):
                 best_dv       = dv
                 best_halo_idx = i
 
-        traj["burns"].append({
+        burn = {
             "x":      float(sc[0]),
             "y":      float(sc[1]),
             "z":      float(sc[2]),
             "dv_kms": best_dv * VU_KMS,
-        })
-
-        # Attach the best-matching halo orbit for 3-D visualisation
+        }
+        # Tag the halo family this burn inserts into (geometry comes from
+        # target_orbits() at render time — no need to ship it per-trajectory).
         if best_halo_idx is not None:
-            h = self._halos[best_halo_idx]
-            traj["halo_x"] = h["states"][:, 0]
-            traj["halo_y"] = h["states"][:, 1]
-            traj["halo_z"] = h["states"][:, 2]
+            burn["orbit_id"] = f"az_{self._halos[best_halo_idx]['az_km']}"
+        traj["burns"].append(burn)
 
         return best_dv, traj
+
+    def target_orbits(self):
+        """One closed curve per precomputed halo amplitude."""
+        self._ensure_halos()
+        return [{
+            "id":    f"az_{h['az_km']}",
+            "label": f"{h['az_km']:,} km",
+            "x":     h["states"][:, 0],
+            "y":     h["states"][:, 1],
+            "z":     h["states"][:, 2],
+        } for h in self._halos]
 
 
 # ── Singleton and registry ────────────────────────────────────────────────────

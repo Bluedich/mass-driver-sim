@@ -31,6 +31,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lunar_sim")
 
+
+def _selected_orbit_ids(trajs):
+    """Orbit ids the given trajectories' burns insert into."""
+    return {b["orbit_id"] for t in trajs for b in t.get("burns", [])
+            if "orbit_id" in b}
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -743,7 +749,9 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
         dest = ALL_DESTINATIONS[dest_id]
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
-        traj_fig = (build_trajectory_view(trajs, dest.label, uirevision=cache_key)
+        traj_fig = (build_trajectory_view(trajs, dest.label, uirevision=cache_key,
+                                          target_orbits=dest.target_orbits(),
+                                          selected_orbit_ids=_selected_orbit_ids(trajs))
                     if trajs else build_empty_trajectory_view("No valid trajectories found"))
         min_dv = np.nanmin(dv_grid[np.isfinite(dv_grid)]) if np.any(np.isfinite(dv_grid)) else 0
         return (moon_fig, traj_fig, {"width": "100%"}, _BAR_SHOWN, True,
@@ -895,7 +903,9 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
         moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
                                   az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
         if trajs:
-            return build_trajectory_view(trajs, dest.label, uirevision=cache_key), moon_fig
+            return build_trajectory_view(trajs, dest.label, uirevision=cache_key,
+                                         target_orbits=dest.target_orbits(),
+                                         selected_orbit_ids=_selected_orbit_ids(trajs)), moon_fig
         return build_empty_trajectory_view("No valid trajectories found"), moon_fig
 
     lat, lon = sel_cell["lat"], sel_cell["lon"]
@@ -906,7 +916,10 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
                               selected_ij=(i, j))
     if cell_trajs is not None and cell_trajs[i, j] is not None:
         label = f"{dest.label} — Lat {lat:.0f}°, Lon {lon:.0f}°"
-        return build_trajectory_view([cell_trajs[i, j]], label, uirevision=cache_key), moon_fig
+        cell = [cell_trajs[i, j]]
+        return build_trajectory_view(cell, label, uirevision=cache_key,
+                                     target_orbits=dest.target_orbits(),
+                                     selected_orbit_ids=_selected_orbit_ids(cell)), moon_fig
     return build_empty_trajectory_view("No trajectory data for this site"), moon_fig
 
 
