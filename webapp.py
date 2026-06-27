@@ -8,12 +8,15 @@ initialising Dash/Plotly.
 """
 
 import os
+import re
+import json
 import logging
 import threading
 import time
+from datetime import datetime
 import numpy as np
 import dash
-from dash import dcc, html, Input, Output, State
+from dash import dcc, html, Input, Output, State, ALL, ctx
 
 from destinations.earth_leo import ALL_DESTINATIONS as _D_LEO
 from destinations.l1_halo   import ALL_DESTINATIONS as _D_L1
@@ -89,6 +92,169 @@ def _format_eta(seconds):
 def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
     return (f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}"
             f"_sp{int(n_sp)}_ins{insertion_mode}_g{len(LATS)}x{len(LONS)}")
+
+
+_CACHE_KEY_RE = re.compile(
+    r"^(?P<dest>.+)_az(?P<n_az>\d+)_el(?P<n_el>\d+)x(?P<max_el>\d+)"
+    r"_sp(?P<n_sp>\d+)_ins(?P<ins>[a-z]+)_g(?P<n_lat>\d+)x(?P<n_lon>\d+)$"
+)
+
+
+def _parse_cache_key(stem):
+    """Reconstruct settings from a cache-key filename stem (None if it doesn't match)."""
+    m = _CACHE_KEY_RE.match(stem)
+    if not m:
+        return None
+    dest_id = m.group("dest")
+    dest = ALL_DESTINATIONS.get(dest_id)
+    return {
+        "dest_id": dest_id,
+        "label": dest.label if dest else dest_id,
+        "n_az": int(m.group("n_az")), "n_el": int(m.group("n_el")),
+        "max_el": int(m.group("max_el")), "n_sp": int(m.group("n_sp")),
+        "insertion_mode": m.group("ins"),
+        "n_lat": int(m.group("n_lat")), "n_lon": int(m.group("n_lon")),
+    }
+
+
+def _load_saved_meta():
+    """Scan the cache dir and return one metadata dict per saved simulation.
+
+    Reads the sidecar JSON when present; otherwise backfills it from the filename
+    (settings), file mtime (timestamp) and a one-time NPZ load (best ΔV). Files
+    whose grid no longer matches the current LATS/LONS are skipped — they can't be
+    reopened against the current code.
+    """
+    metas = []
+    try:
+        names = os.listdir(CACHE_DIR)
+    except FileNotFoundError:
+        return metas
+
+    for name in names:
+        if not name.endswith(".npz") or name == "l1_halos.npz":
+            continue
+        stem = name[:-4]
+        npz_path = os.path.join(CACHE_DIR, name)
+        json_path = os.path.join(CACHE_DIR, f"{stem}.json")
+
+        meta = None
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, encoding="utf-8") as fh:
+                    meta = json.load(fh)
+            except Exception as exc:
+                logger.warning("Sidecar read failed for %s: %s", stem, exc)
+
+        if meta is None:
+            parsed = _parse_cache_key(stem)
+            if parsed is None:
+                continue
+            best_dv = None
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                dv = data["dv_grid"]
+                finite = dv[np.isfinite(dv)]
+                best_dv = float(np.min(finite)) if finite.size else None
+            except Exception as exc:
+                logger.warning("Best-ΔV backfill failed for %s: %s", stem, exc)
+            meta = {**parsed, "created_at": os.path.getmtime(npz_path), "best_dv": best_dv}
+            try:
+                with open(json_path, "w", encoding="utf-8") as fh:
+                    json.dump(meta, fh)
+            except Exception as exc:
+                logger.warning("Sidecar backfill write failed for %s: %s", stem, exc)
+
+        if meta.get("n_lat") != len(LATS) or meta.get("n_lon") != len(LONS):
+            continue
+        meta["cache_key"] = stem
+        metas.append(meta)
+
+    return metas
+
+
+def build_saved_list():
+    """Build the saved-simulations modal body: scenarios as expandable groups."""
+    metas = _load_saved_meta()
+    if not metas:
+        return html.Div("No saved simulations yet.",
+                        className="text-gray-500 text-sm py-6 text-center")
+
+    groups = {}
+    for m in metas:
+        groups.setdefault(m["dest_id"], []).append(m)
+
+    # Order groups by their most recent sim, sims within a group newest-first.
+    ordered = sorted(groups.items(),
+                     key=lambda kv: max(s.get("created_at", 0) for s in kv[1]),
+                     reverse=True)
+
+    sections = []
+    for dest_id, sims in ordered:
+        sims.sort(key=lambda s: s.get("created_at", 0), reverse=True)
+        label = sims[0].get("label", dest_id)
+        rows = [_saved_row(s) for s in sims]
+        sections.append(html.Details(
+            open=True,
+            className="border border-neutral-800 rounded-lg overflow-hidden",
+            children=[
+                html.Summary(
+                    className=(
+                        "flex items-center justify-between px-3 py-2 cursor-pointer "
+                        "bg-neutral-800/60 hover:bg-neutral-800 text-gray-200 "
+                        "text-sm font-medium select-none"
+                    ),
+                    children=[
+                        html.Span(label),
+                        html.Span(f"{len(sims)} saved",
+                                  className="text-gray-500 text-xs font-normal"),
+                    ],
+                ),
+                html.Div(className="divide-y divide-neutral-800", children=rows),
+            ],
+        ))
+    return html.Div(className="flex flex-col gap-3", children=sections)
+
+
+def _saved_row(meta):
+    """One saved-simulation row: settings chips, timestamp, best ΔV, Open/Delete."""
+    key = meta["cache_key"]
+    when = ""
+    try:
+        when = datetime.fromtimestamp(meta["created_at"]).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        pass
+    best = meta.get("best_dv")
+    best_txt = f"{best:.2f} km/s" if isinstance(best, (int, float)) else "—"
+
+    return html.Div(
+        className="flex items-center justify-between gap-3 px-3 py-2",
+        children=[
+            html.Div(className="flex flex-wrap items-center gap-1.5", children=[
+                html.Span(f"{meta['n_az']} az × {meta['n_el']}×{meta['max_el']}° el "
+                          f"× {meta['n_sp']} spd", className=_CHIP_CLS),
+                html.Span(meta["insertion_mode"], className=_CHIP_CLS),
+                html.Span(f"best ΔV: {best_txt}", className=_CHIP_CLS),
+                html.Span(when, className="text-gray-500 text-xs ml-1"),
+            ]),
+            html.Div(className="flex items-center gap-1.5 shrink-0", children=[
+                html.Button(
+                    "Open", id={"type": "sim-open", "key": key}, n_clicks=0,
+                    className=(
+                        "px-2.5 py-1 text-xs rounded border border-gray-600 text-gray-300 "
+                        "hover:border-gray-300 hover:text-white transition-colors cursor-pointer"
+                    ),
+                ),
+                html.Button(
+                    "Delete", id={"type": "sim-delete", "key": key}, n_clicks=0,
+                    className=(
+                        "px-2.5 py-1 text-xs rounded border border-red-900 text-red-400 "
+                        "hover:border-red-500 hover:text-red-300 transition-colors cursor-pointer"
+                    ),
+                ),
+            ]),
+        ],
+    )
 
 
 def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
@@ -180,6 +346,21 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
     except Exception as exc:
         logger.warning("Cache save failed: %s", exc)
 
+    try:
+        finite = dv_grid[np.isfinite(dv_grid)]
+        best_dv = float(np.min(finite)) if finite.size else None
+        meta = {
+            "dest_id": dest_id, "label": dest.label,
+            "n_az": int(n_az), "n_el": int(n_el), "max_el": int(max_el),
+            "n_sp": int(n_sp), "insertion_mode": insertion_mode,
+            "n_lat": len(LATS), "n_lon": len(LONS),
+            "created_at": time.time(), "best_dv": best_dv,
+        }
+        with open(os.path.join(CACHE_DIR, f"{cache_key}.json"), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+    except Exception as exc:
+        logger.warning("Sidecar metadata save failed: %s", exc)
+
     with _lock:
         _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id, cache_key, cell_trajs)
         _compute_state["running"]  = False
@@ -220,6 +401,8 @@ _BAR_HIDDEN    = "hidden h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
 _BAR_SHOWN     = "h-1.5 bg-neutral-800 rounded-full mb-1 overflow-hidden"
 _MODAL_CLOSED  = "hidden fixed inset-0 z-50 bg-black/70 items-center justify-center"
 _MODAL_OPEN    = "flex fixed inset-0 z-50 bg-black/70 items-center justify-center"
+_CHIP_CLS      = ("px-2 py-0.5 rounded text-xs font-mono "
+                  "bg-neutral-800 text-gray-400 border border-neutral-700")
 
 app.layout = html.Div(
     className="min-h-screen bg-[#0d0d0d] p-3 text-gray-200",
@@ -258,6 +441,14 @@ app.layout = html.Div(
                     "px-3 py-1.5 text-sm rounded border border-gray-600 text-gray-300 "
                     "hover:border-gray-300 hover:text-white transition-colors cursor-pointer "
                     "whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                ),
+            ),
+            html.Button(
+                "Saved", id="saved-btn", n_clicks=0,
+                className=(
+                    "px-3 py-1.5 text-sm rounded border border-gray-600 text-gray-300 "
+                    "hover:border-gray-300 hover:text-white transition-colors cursor-pointer "
+                    "whitespace-nowrap"
                 ),
             ),
         ]),
@@ -407,6 +598,36 @@ app.layout = html.Div(
             ],
         ),
     ),
+
+    # ── Saved simulations modal ───────────────────────────────────────────────
+    html.Div(
+        id="saved-modal",
+        className=_MODAL_CLOSED,
+        children=html.Div(
+            className=(
+                "bg-neutral-900 border border-neutral-700 rounded-xl shadow-xl "
+                "w-11/12 max-w-3xl max-h-[90vh] flex flex-col"
+            ),
+            children=[
+                html.Div(
+                    className="flex justify-between items-center py-3 px-4 border-b border-neutral-700 shrink-0",
+                    children=[
+                        html.H3("Saved simulations",
+                                className="font-semibold text-gray-200"),
+                        html.Button(
+                            "×", id="saved-close-btn",
+                            className=(
+                                "w-8 h-8 text-2xl text-gray-400 hover:text-gray-200 "
+                                "flex items-center justify-center rounded-full "
+                                "hover:bg-neutral-800 transition-colors cursor-pointer leading-none"
+                            ),
+                        ),
+                    ],
+                ),
+                html.Div(id="saved-list", className="p-4 overflow-y-auto"),
+            ],
+        ),
+    ),
 ])
 
 
@@ -438,13 +659,13 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     with _lock:
         result = _compute_state.get("result")
         if result and result[6] == cache_key:
-            return False, dest_id, "Loading cached result…", "Recalculate", False, None, default_mode
+            return False, dest_id, "Loading cached result…", "Calculate", False, None, default_mode
 
     cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
     if os.path.exists(cache_path):
         threading.Thread(target=_run_computation,
                          args=(dest_id, n_az, n_el, max_el, n_sp, default_mode), daemon=True).start()
-        return False, dest_id, "Loading from cache…", "Recalculate", True, None, default_mode
+        return False, dest_id, "Loading from cache…", "Calculate", True, None, default_mode
 
     return True, dest_id, "", "Calculate", False, None, default_mode
 
@@ -457,7 +678,6 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     Output("selected-cell", "data",         allow_duplicate=True),
     Input("calc-btn",       "n_clicks"),
     State("active-dest",    "data"),
-    State("calc-btn",       "children"),
     State("n-azimuths",     "value"),
     State("n-elevations",   "value"),
     State("max-elevation",  "value"),
@@ -465,19 +685,9 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     State("insertion-mode", "value"),
     prevent_initial_call=True,
 )
-def on_calculate_click(n_clicks, dest_id, btn_label, n_az, n_el, max_el, n_sp, insertion_mode):
+def on_calculate_click(n_clicks, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
-
-    if btn_label == "Recalculate":
-        cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
-        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
-        try:
-            os.remove(cache_path)
-        except FileNotFoundError:
-            pass
-        with _lock:
-            _compute_state["result"] = None
 
     threading.Thread(target=_run_computation,
                      args=(dest_id, n_az, n_el, max_el, n_sp, insertion_mode), daemon=True).start()
@@ -537,7 +747,7 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
                     if trajs else build_empty_trajectory_view("No valid trajectories found"))
         min_dv = np.nanmin(dv_grid[np.isfinite(dv_grid)]) if np.any(np.isfinite(dv_grid)) else 0
         return (moon_fig, traj_fig, {"width": "100%"}, _BAR_SHOWN, True,
-                f"Done — best ΔV: {min_dv:.2f} km/s", "Recalculate", False)
+                f"Done — best ΔV: {min_dv:.2f} km/s", "Calculate", False)
 
     elapsed = time.perf_counter() - t_start if t_start else 0
     if props_total:
@@ -563,8 +773,76 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     prevent_initial_call=True,
 )
 def toggle_help_modal(open_n, close_n):
-    from dash import ctx
     return _MODAL_OPEN if ctx.triggered_id == "help-btn" else _MODAL_CLOSED
+
+
+@app.callback(
+    Output("saved-modal", "className"),
+    Output("saved-list",  "children"),
+    Input("saved-btn",       "n_clicks"),
+    Input("saved-close-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def toggle_saved_modal(open_n, close_n):
+    if ctx.triggered_id == "saved-btn":
+        return _MODAL_OPEN, build_saved_list()
+    return _MODAL_CLOSED, dash.no_update
+
+
+@app.callback(
+    Output("n-azimuths",    "value"),
+    Output("n-elevations",  "value"),
+    Output("max-elevation", "value"),
+    Output("n-speeds",      "value"),
+    Output("insertion-mode", "value",    allow_duplicate=True),
+    Output("active-dest",    "data",     allow_duplicate=True),
+    Output("selected-cell",  "data",     allow_duplicate=True),
+    Output("poll-interval",  "disabled", allow_duplicate=True),
+    Output("status-text",    "children", allow_duplicate=True),
+    Output("calc-btn",       "children", allow_duplicate=True),
+    Output("calc-btn",       "disabled", allow_duplicate=True),
+    Output("saved-modal",    "className", allow_duplicate=True),
+    Input({"type": "sim-open", "key": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def open_saved_sim(n_clicks_list):
+    if not ctx.triggered_id or not any(n_clicks_list or []):
+        raise dash.exceptions.PreventUpdate
+    key = ctx.triggered_id["key"]
+    settings = _parse_cache_key(key)
+    if settings is None or settings["dest_id"] not in ALL_DESTINATIONS:
+        raise dash.exceptions.PreventUpdate
+
+    n_az, n_el, max_el, n_sp = (settings["n_az"], settings["n_el"],
+                                settings["max_el"], settings["n_sp"])
+    ins     = settings["insertion_mode"]
+    dest_id = settings["dest_id"]
+
+    threading.Thread(target=_run_computation,
+                     args=(dest_id, n_az, n_el, max_el, n_sp, ins), daemon=True).start()
+    return (n_az, n_el, max_el, n_sp, ins, dest_id, None, False,
+            "Loading saved simulation…", "Calculate", True, _MODAL_CLOSED)
+
+
+@app.callback(
+    Output("saved-list", "children", allow_duplicate=True),
+    Input({"type": "sim-delete", "key": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def delete_saved_sim(n_clicks_list):
+    if not ctx.triggered_id or not any(n_clicks_list or []):
+        raise dash.exceptions.PreventUpdate
+    key = ctx.triggered_id["key"]
+    for ext in (".npz", ".json"):
+        try:
+            os.remove(os.path.join(CACHE_DIR, f"{key}{ext}"))
+        except FileNotFoundError:
+            pass
+    with _lock:
+        result = _compute_state.get("result")
+        if result and result[6] == key:
+            _compute_state["result"] = None
+    return build_saved_list()
 
 
 @app.callback(
@@ -683,8 +961,7 @@ def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, 
     Input("dest-dropdown", "value"),
 )
 def update_param_info(n_az, n_el, max_el, n_sp, dest_id):
-    chip = ("px-2 py-0.5 rounded text-xs font-mono "
-            "bg-neutral-800 text-gray-400 border border-neutral-700")
+    chip = _CHIP_CLS
     dest_name = ALL_DESTINATIONS[dest_id].label if dest_id else "none"
     _, elevations, _ = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
     actual_n_el = len(elevations)
