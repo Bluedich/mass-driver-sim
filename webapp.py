@@ -18,9 +18,15 @@ import numpy as np
 import dash
 from dash import dcc, html, Input, Output, State, ALL, ctx
 
-from destinations.earth_leo import ALL_DESTINATIONS as _D_LEO
-from destinations.l1_halo   import ALL_DESTINATIONS as _D_L1
-ALL_DESTINATIONS = {**_D_LEO, **_D_L1}
+from destinations.earth_leo   import ALL_DESTINATIONS as _D_LEO
+from destinations.l1_halo     import ALL_DESTINATIONS as _D_L1
+from destinations.l1_lyapunov import ALL_DESTINATIONS as _D_LYAP
+from destinations.l1_combined import ALL_DESTINATIONS as _D_L1C
+from destinations.l2_halo     import ALL_DESTINATIONS as _D_L2
+from destinations.l2_lyapunov import ALL_DESTINATIONS as _D_L2LYAP
+from destinations.l2_combined import ALL_DESTINATIONS as _D_L2C
+ALL_DESTINATIONS = {**_D_LEO, **_D_L1, **_D_LYAP, **_D_L1C,
+                    **_D_L2, **_D_L2LYAP, **_D_L2C}
 from visualization.moon_map import build_moon_map, build_empty_moon_map
 from visualization.trajectories import build_trajectory_view, build_empty_trajectory_view, scene_bounds, fixed_scene_bounds
 

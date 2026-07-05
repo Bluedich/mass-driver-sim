@@ -1,20 +1,10 @@
 """
-Destination: L1 Halo Orbits (northern family, Az ∈ {5 000, 10 000, 20 000, 30 000} km).
+Destination: L2 Halo Orbits (northern family, Az ∈ {5 000, 10 000, 20 000, 30 000} km).
 
-Strategy
---------
-1. Precompute four northern L1 halo orbits via differential correction
-   (physics/halo.py).  Results are cached to cache/l1_halos.npz so the
-   ~3-second computation only runs once.
-2. Propagate from the Moon surface until the spacecraft enters a sphere of
-   radius R_APPROACH centred on L1.
-3. At that crossing state, find the nearest point (by position) on each
-   precomputed halo orbit and compute the insertion ΔV (prograde / retrograde /
-   both — see L1OrbitDestination).
-4. Return the minimum ΔV across all four orbit sizes.
-
-The propagation, insertion and pickling machinery lives in l1_base.py; this
-module only supplies the halo orbit set (with caching).
+The L2 counterpart of destinations/l1_halo.py — same strategy (propagate to an
+approach sphere centred on L2, then nearest-point insertion onto any of four
+precomputed northern halo orbits).  Orbit geometry is cached to
+cache/l2_halos.npz.  Propagation / insertion / pickling live in l1_base.py.
 """
 
 import os
@@ -23,14 +13,14 @@ import warnings
 import numpy as np
 
 from .l1_base import L1OrbitDestination
-from physics.halo import build_l1_halos
+from physics.halo import build_l2_halos, L2_X
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 HALO_AZ_KM = [5_000, 10_000, 20_000, 30_000]
 
 _CACHE_FILE = os.path.join(
-    os.path.dirname(__file__), "..", "cache", "l1_halos.npz"
+    os.path.dirname(__file__), "..", "cache", "l2_halos.npz"
 )
 
 
@@ -62,7 +52,7 @@ def _load_halos(path):
 
 
 def load_or_compute_halos():
-    """Halo orbit set, loaded from cache/l1_halos.npz or computed and cached."""
+    """L2 halo orbit set, loaded from cache/l2_halos.npz or computed and cached."""
     cache = os.path.abspath(_CACHE_FILE)
 
     if os.path.exists(cache):
@@ -71,33 +61,34 @@ def load_or_compute_halos():
             if halos:
                 return halos
         except Exception as exc:
-            warnings.warn(f"L1 halo cache load failed ({exc}); recomputing.")
+            warnings.warn(f"L2 halo cache load failed ({exc}); recomputing.")
 
-    halos = build_l1_halos(HALO_AZ_KM)
+    halos = build_l2_halos(HALO_AZ_KM)
 
     try:
         _save_halos(cache, halos)
     except Exception as exc:
-        warnings.warn(f"Could not save L1 halo cache: {exc}")
+        warnings.warn(f"Could not save L2 halo cache: {exc}")
 
     return halos
 
 
 def halo_orbits():
-    """Halo orbit set mapped to the L1OrbitDestination dict shape."""
+    """L2 halo orbit set mapped to the L1OrbitDestination dict shape."""
     return [{
-        "id":     f"az_{h['az_km']}",
-        "label":  f"{h['az_km']:,} km halo",
+        "id":     f"l2_az_{h['az_km']}",
+        "label":  f"{h['az_km']:,} km L2 halo",
         "states": h["states"],
     } for h in load_or_compute_halos()]
 
 
 # ── Destination class ─────────────────────────────────────────────────────────
 
-class L1Halo(L1OrbitDestination):
+class L2Halo(L1OrbitDestination):
 
-    id    = "l1_halo"
-    label = "L1 Halo Orbits (5 000–30 000 km)"
+    id    = "l2_halo"
+    label = "L2 Halo Orbits (5 000–30 000 km)"
+    approach_center_x = L2_X
 
     def _build_orbits(self):
         return halo_orbits()
@@ -105,8 +96,8 @@ class L1Halo(L1OrbitDestination):
 
 # ── Singleton and registry ────────────────────────────────────────────────────
 
-L1_HALO_DEST = L1Halo()
+L2_HALO_DEST = L2Halo()
 
 ALL_DESTINATIONS = {
-    L1_HALO_DEST.id: L1_HALO_DEST,
+    L2_HALO_DEST.id: L2_HALO_DEST,
 }

@@ -13,10 +13,20 @@ from .cr3bp import MU, DU_KM, VU_KMS, lagrange_points, propagate
 
 # ── Linearised dynamics at L1 ─────────────────────────────────────────────────
 
-def _compute_l1_constants():
+def _collinear_constants(idx):
+    """
+    Linearised dynamics at a collinear libration point.
+
+    idx : 0 = L1, 1 = L2 (matches lagrange_points() ordering).
+
+    The in-plane / out-of-plane frequencies and the |vy|/|vx| amplitude ratio K
+    are only used to seed the differential corrector, so the same c2 expression
+    (Earth at distance 1+gamma) serves both points to within the corrector's
+    basin of attraction.
+    """
     pts = lagrange_points()
-    L1_x = pts[0][0]                          # index 0 = L1
-    gamma = (1.0 - MU) - L1_x                # Moon→L1 distance [DU]
+    Lx    = pts[idx][0]
+    gamma = abs((1.0 - MU) - Lx)             # distance to the Moon [DU]
 
     c2 = MU / gamma**3 + (1.0 - MU) / (1.0 + gamma)**3
 
@@ -25,10 +35,11 @@ def _compute_l1_constants():
     wz   = np.sqrt(c2)                         # out-of-plane freq [rad/TU]
     k    = (wp**2 + 1.0 + 2.0 * c2) / (2.0 * wp)  # |vy|/|vx| amplitude ratio
 
-    return L1_x, gamma, c2, wp, wz, k
+    return Lx, gamma, c2, wp, wz, k
 
 
-L1_X, GAMMA1, C2, WP, WZ, K = _compute_l1_constants()
+L1_X, GAMMA1, C2,    WP,  WZ,  K  = _collinear_constants(0)
+L2_X, GAMMA2, C2_L2, WP2, WZ2, K2 = _collinear_constants(1)
 
 # ── Differential corrector internals ─────────────────────────────────────────
 
@@ -132,28 +143,25 @@ def _sample_orbit(x0, vy0, az_du, n_pts=500):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_l1_halos(az_km_list=None):
+def _build_halos(az_km_list, Lx, wp, k, x_dir, point_label):
     """
-    Compute northern L1 halo orbits for each Az value in az_km_list.
+    Compute northern halo orbits about a collinear point for each Az value.
 
     Uses continuation: bootstraps at Az=5 000 km (where linear theory is
     accurate) then steps upward in 500 km increments to reach each target.
 
     Parameters
     ----------
-    az_km_list : list of int, optional
-        Out-of-plane amplitudes in km.  Defaults to [5000, 10000, 20000, 30000].
+    az_km_list : list of int     out-of-plane amplitudes [km]
+    Lx, wp, k  : float           libration-point linear constants
+    x_dir      : +1 | -1         sign of the bootstrap x-excursion from Lx
+                                 (L1 halos sit toward the Moon, L2 away from it)
+    point_label: str             used only in the error/warning messages
 
     Returns
     -------
-    list of dict, each with keys:
-        'az_km'  : int
-        'T'      : float   (non-dim full period, TU)
-        'states' : ndarray, shape (N_PTS, 6) — one full period uniformly sampled
+    list of dict, each with keys 'az_km', 'T', 'states' (see build_l1_halos).
     """
-    if az_km_list is None:
-        az_km_list = [5_000, 10_000, 20_000, 30_000]
-
     az_km_sorted = sorted(az_km_list)
     az_km_set    = set(az_km_sorted)
     az_max_km    = az_km_sorted[-1]
@@ -161,15 +169,16 @@ def build_l1_halos(az_km_list=None):
     # ── Bootstrap at Az = 5 000 km via linear-theory guess ───────────────────
     AZ_BOOT_KM = 5_000
     az_boot    = AZ_BOOT_KM / DU_KM
-    ax_guess   = 1.5 * az_boot                   # rough Ax ≈ 1.5 Az for L1 halos
-    x0_boot    = L1_X + ax_guess
-    vy0_boot   = -K * ax_guess * WP              # negative for northern halo
+    ax_guess   = 1.5 * az_boot                   # rough Ax ≈ 1.5 Az for halos
+    x0_boot    = Lx + x_dir * ax_guess
+    vy0_boot   = -k * ax_guess * wp              # negative for northern halo
 
     boot = _find_halo(az_boot, x0_boot, vy0_boot)
     if boot is None:
         raise RuntimeError(
-            f"L1 halo bootstrap at Az={AZ_BOOT_KM} km failed to converge. "
-            "Check that physics/cr3bp.py is importable and MU is correct."
+            f"{point_label} halo bootstrap at Az={AZ_BOOT_KM} km failed to "
+            "converge.  Check that physics/cr3bp.py is importable and MU is "
+            "correct."
         )
     x0_cur, vy0_cur = boot
 
@@ -190,7 +199,7 @@ def build_l1_halos(az_km_list=None):
         if sol is None:
             import warnings
             warnings.warn(
-                f"L1 halo continuation failed at Az={az_km_next} km; "
+                f"{point_label} halo continuation failed at Az={az_km_next} km; "
                 "stopping continuation."
             )
             break
@@ -205,20 +214,51 @@ def build_l1_halos(az_km_list=None):
     return [results[az] for az in az_km_sorted if az in results]
 
 
-# ── L1 approach event (used by destinations/l1_halo.py) ──────────────────────
+def build_l1_halos(az_km_list=None):
+    """
+    Northern L1 halo orbits for each Az value in az_km_list (default
+    [5000, 10000, 20000, 30000]).  See _build_halos for the return shape.
+    """
+    if az_km_list is None:
+        az_km_list = [5_000, 10_000, 20_000, 30_000]
+    return _build_halos(az_km_list, L1_X, WP, K, x_dir=+1, point_label="L1")
 
-def make_l1_approach_event(r_threshold=0.09):
+
+def build_l2_halos(az_km_list=None):
+    """
+    Northern L2 halo orbits for each Az value in az_km_list (default
+    [5000, 10000, 20000, 30000]).  L2 sits beyond the Moon, so the bootstrap
+    x-excursion points back toward it (x_dir=-1).
+    """
+    if az_km_list is None:
+        az_km_list = [5_000, 10_000, 20_000, 30_000]
+    return _build_halos(az_km_list, L2_X, WP2, K2, x_dir=-1, point_label="L2")
+
+
+# ── Approach events (used by destinations/l{1,2}_*.py) ───────────────────────
+
+def make_approach_event(center_x, r_threshold=0.09):
     """
     Terminal event that fires when the spacecraft enters a sphere of radius
-    r_threshold [DU] centred on L1.
+    r_threshold [DU] centred on (center_x, 0, 0).
 
-    r_threshold = 0.09 DU ≈ 34 600 km — encloses all target halo orbits.
-    direction = -1 (distance decreasing, i.e. approaching L1).
+    r_threshold = 0.09 DU ≈ 34 600 km — encloses the target orbit set.
+    direction = -1 (distance decreasing, i.e. approaching the point).
     """
     def event(t, state):
         x, y, z = state[:3]
-        return np.sqrt((x - L1_X)**2 + y**2 + z**2) - r_threshold
+        return np.sqrt((x - center_x)**2 + y**2 + z**2) - r_threshold
 
     event.terminal  = True
     event.direction = -1
     return event
+
+
+def make_l1_approach_event(r_threshold=0.09):
+    """Approach sphere centred on L1."""
+    return make_approach_event(L1_X, r_threshold)
+
+
+def make_l2_approach_event(r_threshold=0.09):
+    """Approach sphere centred on L2."""
+    return make_approach_event(L2_X, r_threshold)
