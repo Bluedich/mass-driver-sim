@@ -251,6 +251,8 @@ def make_approach_event(center_x, r_threshold=0.09):
 
     event.terminal  = True
     event.direction = -1
+    # Generic sphere-crossing form for the JIT integrator.
+    event.sphere = (float(center_x), 0.0, 0.0, float(r_threshold), -1.0)
     return event
 
 

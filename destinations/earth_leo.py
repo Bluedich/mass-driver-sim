@@ -48,6 +48,8 @@ def make_target_altitude_event():
 
     event.terminal  = True
     event.direction = -1   # inbound (r decreasing through R_TARGET)
+    # Generic sphere-crossing form for the JIT integrator.
+    event.sphere = (-MU, 0.0, 0.0, R_TARGET_DU, -1.0)
     return event
 
 

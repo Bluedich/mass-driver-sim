@@ -4,3 +4,6 @@ plotly
 dash
 Pillow
 requests
+
+# Optional: `pip install -r requirements-fast.txt` adds numba for the ~150×
+# JIT trajectory integrator (physics/fast_propagate.py). The app runs without it.

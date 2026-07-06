@@ -39,3 +39,7 @@ desktop.ini
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Machine-generated scipy reference captures (regenerate with
+# `python -m tests.bench_trajectory --save-ref`)
+tests/_bench_ref/

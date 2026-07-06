@@ -1,0 +1,12 @@
+# Optional acceleration for the trajectory hot path.
+#
+# Installing numba enables physics/fast_propagate.py — a JIT-compiled CR3BP
+# integrator that replaces the scipy solve_ivp path and is ~150× faster per
+# propagation (identical results). Without it the app falls back to scipy
+# automatically (physics.cr3bp.propagate checks HAVE_NUMBA at runtime).
+#
+#   pip install -r requirements.txt -r requirements-fast.txt
+#
+# numba pins a compatible numpy; that's expected.
+-r requirements.txt
+numba

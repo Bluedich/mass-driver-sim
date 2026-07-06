@@ -120,6 +120,13 @@ def _pool_init(destination):
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
+    # Warm up the numba JIT integrator once per worker (loads the on-disk cache
+    # if present) so the first real propagation isn't charged the compile cost.
+    try:
+        from .fast_propagate import warmup
+        warmup()
+    except Exception:
+        pass
 
 
 def _prop_worker(args):

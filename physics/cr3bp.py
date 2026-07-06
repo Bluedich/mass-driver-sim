@@ -14,6 +14,7 @@ Positive x points from Earth toward Moon.
 z is the orbit-normal (northward).
 """
 
+import os
 import numpy as np
 from scipy.integrate import solve_ivp
 
@@ -27,6 +28,26 @@ VU_KMS = DU_KM / TU_S       # km/s per VU  ≈ 1.02454
 
 R_MOON_DU = 1_737.4 / DU_KM   # Moon radius in DU
 R_EARTH_DU = 6_371.0 / DU_KM  # Earth radius in DU
+
+
+# ── Optional numba fast path ──────────────────────────────────────────────────
+# Imported lazily (fast_propagate imports MU from here) so the two modules can
+# import in either order without a circular-import failure. Cached after the
+# first propagate() call.
+_FAST = None
+_FAST_CHECKED = False
+
+
+def _get_fast():
+    global _FAST, _FAST_CHECKED
+    if not _FAST_CHECKED:
+        try:
+            from . import fast_propagate as _fp
+            _FAST = _fp
+        except Exception:
+            _FAST = None
+        _FAST_CHECKED = True
+    return _FAST
 
 
 def eom(t, state):
@@ -45,7 +66,9 @@ def eom(t, state):
     ay = -2*vx + y - c1*y - c2*y
     az = -c1*z - c2*z
 
-    return [vx, vy, vz, ax, ay, az]
+    # Return an ndarray rather than a list: solve_ivp otherwise coerces the
+    # list to an array on every one of the 6 RHS evaluations per RK step.
+    return np.array([vx, vy, vz, ax, ay, az])
 
 
 def jacobi(state):
@@ -59,7 +82,7 @@ def jacobi(state):
 
 
 def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05,
-              t_eval=None):
+              t_eval=None, method="RK45"):
     """
     Integrate CR3BP from state0 over t_span (non-dimensional time).
 
@@ -75,16 +98,38 @@ def propagate(state0, t_span, events=None, rtol=1e-9, atol=1e-11, max_step=0.05,
     max_step : maximum step size (TU). Default 0.05 ≈ 45 min.
     t_eval : array-like or None.
         Times at which to store the solution (passed to solve_ivp).
+    method : scipy solve_ivp method name. Default "RK45"; "DOP853" (higher
+        order) takes larger steps on smooth arcs when max_step is loose.
 
     Returns
     -------
-    sol : OdeResult from scipy (sol.t, sol.y, sol.t_events, sol.y_events).
+    sol : OdeResult from scipy (sol.t, sol.y, sol.t_events, sol.y_events), or a
+        compatible ``_FastSol`` when the numba fast path is used (see below).
+
+    Fast path
+    ---------
+    When numba is available, ``method == "RK45"``, ``t_eval is None``, and every
+    event exposes a ``.sphere`` attribute (all destination events do), this
+    dispatches to the ~150× faster JIT integrator in ``fast_propagate`` — which
+    reproduces scipy's RK45 step control and event bracketing.  Set the env var
+    ``MDS_DISABLE_FAST=1`` to force the scipy path (used for A/B verification).
+    Orbit-generation calls (plain closures without ``.sphere``, or with
+    ``t_eval``) transparently stay on scipy.
     """
+    if (events and t_eval is None and method == "RK45"
+            and not os.environ.get("MDS_DISABLE_FAST")):
+        fast = _get_fast()
+        if fast is not None and fast.HAVE_NUMBA:
+            events_arr = fast._events_to_array(events)
+            if events_arr is not None:
+                return fast.propagate_fast(
+                    state0, t_span, events, rtol, atol, max_step)
+
     sol = solve_ivp(
         eom,
         t_span,
         state0,
-        method="RK45",
+        method=method,
         events=events,
         rtol=rtol,
         atol=atol,
@@ -134,6 +179,9 @@ def make_moon_impact_event():
 
     event.terminal = True
     event.direction = -1
+    # Generic sphere-crossing form (cx, cy, cz, radius, direction) for the JIT
+    # integrator: g = ‖pos − centre‖ − radius, crossed in the given direction.
+    event.sphere = (1.0 - MU, 0.0, 0.0, R_MOON_DU, -1.0)
     return event
 
 
@@ -146,6 +194,7 @@ def make_earth_impact_event():
 
     event.terminal = True
     event.direction = -1
+    event.sphere = (-MU, 0.0, 0.0, R_EARTH_DU, -1.0)
     return event
 
 
@@ -158,6 +207,9 @@ def make_escape_event(r_max=5.0):
 
     event.terminal = True
     event.direction = -1
+    # In the generic distance-minus-radius convention the barycentre-distance
+    # increases through r_max, i.e. an upward (direction +1) crossing.
+    event.sphere = (0.0, 0.0, 0.0, r_max, +1.0)
     return event
 
 
