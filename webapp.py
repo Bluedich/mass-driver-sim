@@ -59,9 +59,11 @@ GRID_LON_STEP = 30
 
 # Poles are included as single representative sites (all lons are the same
 # physical point at ±90°, so only one propagation set is run per pole).
-# Far-side left (lon < -90°) is excluded for now; only the right side is tested.
+# Longitudes span the full 360° globe at 30° steps (−180°…+180°). Both ±180°
+# are included so the far-side meridian renders as a seamless half-cell on each
+# map edge; they are the same physical point and yield identical ΔV.
 LATS = np.array([-90, -60, -30,  0, 30, 60, 90], dtype=float)
-LONS = np.array([-90, -60, -30,  0, 30, 60, 90, 120, 150, 180], dtype=float)
+LONS = np.arange(-180, 181, 30, dtype=float)
 
 # ── Shared computation state ──────────────────────────────────────────────────
 _compute_state = {
