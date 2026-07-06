@@ -56,17 +56,16 @@ try:
 except FileNotFoundError:
     _ARCH_MD = "*ARCHITECTURE.md not found.*"
 
-# ── Grid resolution ──────────────────────────────────────────────────────────
-GRID_LAT_STEP = 30
-GRID_LON_STEP = 30
+# ── Tiling density ───────────────────────────────────────────────────────────
+# Launch sites are an equal-area Fibonacci/Voronoi tiling of the Moon (see
+# physics.tiling). The tile count N is a free, user-adjustable parameter; every
+# tile is one launch site at its centre. The tiling is a deterministic function
+# of N, so a given N reproduces the identical tiles (cache correctness).
+from physics.tiling import generate_tiling, MIN_TILES
 
-# Poles are included as single representative sites (all lons are the same
-# physical point at ±90°, so only one propagation set is run per pole).
-# Longitudes span the full 360° globe at 30° steps (−180°…+180°). Both ±180°
-# are included so the far-side meridian renders as a seamless half-cell on each
-# map edge; they are the same physical point and yield identical ΔV.
-LATS = np.array([-90, -60, -30,  0, 30, 60, 90], dtype=float)
-LONS = np.arange(-180, 181, 30, dtype=float)
+# ~80 tiles matches the old rectangular grid's ~79 unique compute sites, so the
+# default run cost is comparable; raise the "Tiles (density)" input for finer maps.
+DEFAULT_N_TILES = 80
 
 # ── Shared computation state ──────────────────────────────────────────────────
 _compute_state = {
@@ -106,19 +105,24 @@ def _format_eta(seconds):
     return f"{seconds // 3600} h {(seconds % 3600) // 60} min"
 
 
-def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
+def _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde",
+                    n_tiles=DEFAULT_N_TILES):
     return (f"{dest_id}_az{int(n_az)}_el{int(n_el)}x{int(max_el)}"
-            f"_sp{int(n_sp)}_ins{insertion_mode}_g{len(LATS)}x{len(LONS)}")
+            f"_sp{int(n_sp)}_ins{insertion_mode}_fibN{int(n_tiles)}")
 
 
 _CACHE_KEY_RE = re.compile(
     r"^(?P<dest>.+)_az(?P<n_az>\d+)_el(?P<n_el>\d+)x(?P<max_el>\d+)"
-    r"_sp(?P<n_sp>\d+)_ins(?P<ins>[a-z]+)_g(?P<n_lat>\d+)x(?P<n_lon>\d+)$"
+    r"_sp(?P<n_sp>\d+)_ins(?P<ins>[a-z]+)_fibN(?P<n_tiles>\d+)$"
 )
 
 
 def _parse_cache_key(stem):
-    """Reconstruct settings from a cache-key filename stem (None if it doesn't match)."""
+    """Reconstruct settings from a cache-key filename stem (None if it doesn't match).
+
+    Legacy rectangular-grid keys (``…_g7x13``) no longer match and return None,
+    so old caches are ignored automatically.
+    """
     m = _CACHE_KEY_RE.match(stem)
     if not m:
         return None
@@ -130,7 +134,7 @@ def _parse_cache_key(stem):
         "n_az": int(m.group("n_az")), "n_el": int(m.group("n_el")),
         "max_el": int(m.group("max_el")), "n_sp": int(m.group("n_sp")),
         "insertion_mode": m.group("ins"),
-        "n_lat": int(m.group("n_lat")), "n_lon": int(m.group("n_lon")),
+        "n_tiles": int(m.group("n_tiles")),
     }
 
 
@@ -138,9 +142,9 @@ def _load_saved_meta():
     """Scan the cache dir and return one metadata dict per saved simulation.
 
     Reads the sidecar JSON when present; otherwise backfills it from the filename
-    (settings), file mtime (timestamp) and a one-time NPZ load (best ΔV). Files
-    whose grid no longer matches the current LATS/LONS are skipped — they can't be
-    reopened against the current code.
+    (settings), file mtime (timestamp) and a one-time NPZ load (best ΔV). Legacy
+    rectangular-grid sims (no tile count) are skipped — they can't be reopened
+    against the current equal-area tiling code.
     """
     metas = []
     try:
@@ -170,7 +174,7 @@ def _load_saved_meta():
             best_dv = None
             try:
                 data = np.load(npz_path, allow_pickle=True)
-                dv = data["dv_grid"]
+                dv = data["dv"]
                 finite = dv[np.isfinite(dv)]
                 best_dv = float(np.min(finite)) if finite.size else None
             except Exception as exc:
@@ -182,7 +186,8 @@ def _load_saved_meta():
             except Exception as exc:
                 logger.warning("Sidecar backfill write failed for %s: %s", stem, exc)
 
-        if meta.get("n_lat") != len(LATS) or meta.get("n_lon") != len(LONS):
+        # Legacy rectangular-grid sims have no n_tiles — skip them.
+        if meta.get("n_tiles") is None:
             continue
         meta["cache_key"] = stem
         metas.append(meta)
@@ -248,6 +253,7 @@ def _saved_row(meta):
         className="flex items-center justify-between gap-3 px-3 py-2",
         children=[
             html.Div(className="flex flex-wrap items-center gap-1.5", children=[
+                html.Span(f"{meta.get('n_tiles', '?')} tiles", className=_CHIP_CLS),
                 html.Span(f"{meta['n_az']} az × {meta['n_el']}×{meta['max_el']}° el "
                           f"× {meta['n_sp']} spd", className=_CHIP_CLS),
                 html.Span(meta["insertion_mode"], className=_CHIP_CLS),
@@ -274,11 +280,13 @@ def _saved_row(meta):
     )
 
 
-def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde"):
-    """Background thread: compute suitability grid and sample trajectories."""
+def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde",
+                     n_tiles=DEFAULT_N_TILES):
+    """Background thread: compute the equal-area suitability map and sample trajectories."""
     dest = ALL_DESTINATIONS[dest_id]
     dest.insertion_mode = insertion_mode
-    cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
+    n_tiles    = max(MIN_TILES, int(n_tiles))
+    cache_key  = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles)
     cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
 
     with _lock:
@@ -289,26 +297,24 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
         _compute_state["cache_key"] = cache_key
         _compute_state["error"]     = None
 
-    n_polar_lats    = sum(1 for lat in LATS if abs(lat) == 90.0)
-    n_compute_sites = (len(LATS) - n_polar_lats) * len(LONS) + n_polar_lats
-    n_sites         = len(LATS) * len(LONS)   # total cells (includes secondary polar)
-    logger.info("Computation requested for '%s' (%d×%d = %d cells, %d compute sites)",
-                dest.label, len(LATS), len(LONS), n_sites, n_compute_sites)
+    tiling  = generate_tiling(n_tiles)
+    n_sites = tiling.n
+    logger.info("Computation requested for '%s' (%d equal-area tiles)", dest.label, n_sites)
 
     if os.path.exists(cache_path):
         logger.info("Cache hit: %s — loading from disk", cache_path)
         t0 = time.perf_counter()
         try:
             data     = np.load(cache_path, allow_pickle=True)
-            dv_grid    = data["dv_grid"]
+            dv         = data["dv"]
             trajs      = list(data["trajs"])
-            az_grid    = data["az_grid"]    if "az_grid"    in data else None
-            el_grid    = data["el_grid"]    if "el_grid"    in data else None
-            spd_grid   = data["spd_grid"]   if "spd_grid"   in data else None
+            az         = data["az"]         if "az"         in data else None
+            el         = data["el"]         if "el"         in data else None
+            spd        = data["spd"]        if "spd"        in data else None
             cell_trajs = data["cell_trajs"] if "cell_trajs" in data else None
             logger.info("Cache loaded in %.2f s", time.perf_counter() - t0)
             with _lock:
-                _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id, cache_key, cell_trajs)
+                _compute_state["result"]   = (dv, trajs, az, el, spd, dest_id, cache_key, cell_trajs, tiling)
                 _compute_state["running"]  = False
                 _compute_state["progress"] = 1.0
             return
@@ -318,12 +324,12 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
     from physics.optimizer import compute_grid
 
     azimuths, elevations, speeds_kms = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
-    n_props_total = n_compute_sites * len(azimuths) * len(elevations) * len(speeds_kms)
+    n_props_total = n_sites * len(azimuths) * len(elevations) * len(speeds_kms)
     with _lock:
         _compute_state["props_done"]  = 0
         _compute_state["props_total"] = n_props_total
         _compute_state["sites_done"]  = 0
-        _compute_state["sites_total"] = n_compute_sites
+        _compute_state["sites_total"] = n_sites
         _compute_state["t_start"]     = time.perf_counter()
 
     def _progress(props_done, props_total):
@@ -337,8 +343,8 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
 
     t0 = time.perf_counter()
     try:
-        dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs = compute_grid(
-            LATS, LONS, dest,
+        dv, trajs, az, el, spd, cell_trajs = compute_grid(
+            tiling.sites, dest,
             progress_cb=_progress,
             site_cb=_site_done,
             azimuths=azimuths,
@@ -356,21 +362,20 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
 
     t_save = time.perf_counter()
     try:
-        np.savez(cache_path, dv_grid=dv_grid, trajs=np.array(trajs, dtype=object),
-                 az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid,
-                 cell_trajs=cell_trajs)
+        np.savez(cache_path, dv=dv, trajs=np.array(trajs, dtype=object),
+                 az=az, el=el, spd=spd, cell_trajs=cell_trajs, n_tiles=n_tiles)
         logger.info("Cache saved to %s (%.2f s)", cache_path, time.perf_counter() - t_save)
     except Exception as exc:
         logger.warning("Cache save failed: %s", exc)
 
     try:
-        finite = dv_grid[np.isfinite(dv_grid)]
+        finite = dv[np.isfinite(dv)]
         best_dv = float(np.min(finite)) if finite.size else None
         meta = {
             "dest_id": dest_id, "label": dest.label,
             "n_az": int(n_az), "n_el": int(n_el), "max_el": int(max_el),
             "n_sp": int(n_sp), "insertion_mode": insertion_mode,
-            "n_lat": len(LATS), "n_lon": len(LONS),
+            "n_tiles": int(n_tiles),
             "created_at": time.time(), "best_dv": best_dv,
         }
         with open(os.path.join(CACHE_DIR, f"{cache_key}.json"), "w", encoding="utf-8") as fh:
@@ -379,7 +384,7 @@ def _run_computation(dest_id, n_az, n_el, max_el, n_sp, insertion_mode="prograde
         logger.warning("Sidecar metadata save failed: %s", exc)
 
     with _lock:
-        _compute_state["result"]   = (dv_grid, trajs, az_grid, el_grid, spd_grid, dest_id, cache_key, cell_trajs)
+        _compute_state["result"]   = (dv, trajs, az, el, spd, dest_id, cache_key, cell_trajs, tiling)
         _compute_state["running"]  = False
         _compute_state["progress"] = 1.0
 
@@ -487,19 +492,25 @@ app.layout = html.Div(
                  children=dcc.Graph(id="moon-map", figure=build_empty_moon_map(),
                                     config={"displayModeBar": False})),
         html.Div(className="flex flex-col gap-1", children=[
-            html.Div(className="flex gap-1", children=[
-                html.Button("Center: Moon", id="center-moon-btn", n_clicks=0,
-                            className=(
-                                "px-2 py-0.5 text-xs rounded border border-neutral-700 "
-                                "text-gray-400 hover:border-gray-500 hover:text-gray-200 "
-                                "transition-colors cursor-pointer"
-                            )),
-                html.Button("Center: Earth", id="center-earth-btn", n_clicks=0,
-                            className=(
-                                "px-2 py-0.5 text-xs rounded border border-neutral-700 "
-                                "text-gray-400 hover:border-gray-500 hover:text-gray-200 "
-                                "transition-colors cursor-pointer"
-                            )),
+            html.Div(className="flex flex-wrap gap-1 items-center", children=[
+                html.Span("Center:", className="text-gray-500 text-xs pr-0.5"),
+                *[
+                    html.Button(
+                        label,
+                        id={"type": "center-btn", "target": target},
+                        n_clicks=0,
+                        className=(
+                            "px-2 py-0.5 text-xs rounded border border-neutral-700 "
+                            "text-gray-400 hover:border-gray-500 hover:text-gray-200 "
+                            "transition-colors cursor-pointer"
+                        ),
+                    )
+                    for label, target in [
+                        ("Moon", "moon"), ("Earth", "earth"),
+                        ("L1", "L1"), ("L2", "L2"), ("L3", "L3"),
+                        ("L4", "L4"), ("L5", "L5"),
+                    ]
+                ],
             ]),
             html.Div(className="rounded-lg overflow-hidden",
                      children=dcc.Graph(id="traj-view", figure=build_empty_trajectory_view(),
@@ -569,6 +580,28 @@ app.layout = html.Div(
                     clearable=False,
                     style={"backgroundColor": "#262626", "color": "#e5e5e5",
                            "border": "1px solid #525252", "minWidth": "150px"},
+                ),
+            ]),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Tiles (density)", htmlFor="n-tiles",
+                           className="text-gray-400 text-xs font-medium"),
+                dcc.Input(id="n-tiles", type="number", value=DEFAULT_N_TILES,
+                          min=MIN_TILES, max=20000, step=1, debounce=True,
+                          className=(
+                              "w-24 bg-neutral-800 border border-neutral-700 rounded "
+                              "text-gray-200 text-sm px-2 py-1 focus:outline-none "
+                              "focus:border-gray-500"
+                          )),
+            ]),
+            html.Div(className="flex flex-col gap-1", children=[
+                html.Label("Cell borders", className="text-gray-400 text-xs font-medium"),
+                dcc.Checklist(
+                    id="show-borders",
+                    options=[{"label": " show", "value": "on"}],
+                    value=[],
+                    className="text-gray-300 text-sm",
+                    inputClassName="mr-1 align-middle",
+                    labelClassName="cursor-pointer select-none",
                 ),
             ]),
         ]),
@@ -664,15 +697,16 @@ app.layout = html.Div(
     State("max-elevation",   "value"),
     State("n-speeds",        "value"),
     State("insertion-mode",  "value"),
+    State("n-tiles",         "value"),
     prevent_initial_call=True,
 )
-def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
+def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles):
     if not dest_id:
         return True, None, "", "Calculate", True, None, "prograde"
 
     dest = ALL_DESTINATIONS[dest_id]
     default_mode = dest.default_insertion_mode
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, default_mode)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, default_mode, n_tiles)
     with _lock:
         result = _compute_state.get("result")
         if result and result[6] == cache_key:
@@ -681,7 +715,7 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     cache_path = os.path.join(CACHE_DIR, f"{cache_key}.npz")
     if os.path.exists(cache_path):
         threading.Thread(target=_run_computation,
-                         args=(dest_id, n_az, n_el, max_el, n_sp, default_mode), daemon=True).start()
+                         args=(dest_id, n_az, n_el, max_el, n_sp, default_mode, n_tiles), daemon=True).start()
         return False, dest_id, "Loading from cache…", "Calculate", True, None, default_mode
 
     return True, dest_id, "", "Calculate", False, None, default_mode
@@ -700,14 +734,15 @@ def on_destination_select(dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
     State("max-elevation",  "value"),
     State("n-speeds",       "value"),
     State("insertion-mode", "value"),
+    State("n-tiles",        "value"),
     prevent_initial_call=True,
 )
-def on_calculate_click(n_clicks, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
+def on_calculate_click(n_clicks, dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
 
     threading.Thread(target=_run_computation,
-                     args=(dest_id, n_az, n_el, max_el, n_sp, insertion_mode), daemon=True).start()
+                     args=(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles), daemon=True).start()
     return False, "Computing suitability map…", "Computing…", True, None
 
 
@@ -727,14 +762,16 @@ def on_calculate_click(n_clicks, dest_id, n_az, n_el, max_el, n_sp, insertion_mo
     State("max-elevation",  "value"),
     State("n-speeds",       "value"),
     State("insertion-mode", "value"),
+    State("n-tiles",        "value"),
+    State("show-borders",   "value"),
     prevent_initial_call=True,
 )
-def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
+def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles, show_borders):
     if not dest_id:
         return (build_empty_moon_map(), build_empty_trajectory_view(),
                 {"width": "0%"}, _BAR_HIDDEN, True, "", "Calculate", True)
 
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles)
 
     with _lock:
         progress    = _compute_state["progress"]
@@ -756,15 +793,16 @@ def poll_progress(n, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
                 "Calculate", False)
 
     if result and result[6] == cache_key:
-        dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
+        dv, trajs, az, el, spd, _, _, cell_trajs, tiling = result
         dest = ALL_DESTINATIONS[dest_id]
-        moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
-                                  az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
+        moon_fig = build_moon_map(tiling, dv, dest.label,
+                                  az=az, el=el, spd=spd,
+                                  show_borders=bool(show_borders))
         traj_fig = (build_trajectory_view(trajs, dest.label, uirevision=cache_key,
                                           target_orbits=dest.target_orbits(),
                                           selected_orbit_ids=_selected_orbit_ids(trajs))
                     if trajs else build_empty_trajectory_view("No valid trajectories found"))
-        min_dv = np.nanmin(dv_grid[np.isfinite(dv_grid)]) if np.any(np.isfinite(dv_grid)) else 0
+        min_dv = np.nanmin(dv[np.isfinite(dv)]) if np.any(np.isfinite(dv)) else 0
         return (moon_fig, traj_fig, {"width": "100%"}, _BAR_SHOWN, True,
                 f"Done — best ΔV: {min_dv:.2f} km/s", "Calculate", False)
 
@@ -813,6 +851,7 @@ def toggle_saved_modal(open_n, close_n):
     Output("n-elevations",  "value"),
     Output("max-elevation", "value"),
     Output("n-speeds",      "value"),
+    Output("n-tiles",       "value",     allow_duplicate=True),
     Output("insertion-mode", "value",    allow_duplicate=True),
     Output("active-dest",    "data",     allow_duplicate=True),
     Output("selected-cell",  "data",     allow_duplicate=True),
@@ -834,12 +873,13 @@ def open_saved_sim(n_clicks_list):
 
     n_az, n_el, max_el, n_sp = (settings["n_az"], settings["n_el"],
                                 settings["max_el"], settings["n_sp"])
+    n_tiles = settings["n_tiles"]
     ins     = settings["insertion_mode"]
     dest_id = settings["dest_id"]
 
     threading.Thread(target=_run_computation,
-                     args=(dest_id, n_az, n_el, max_el, n_sp, ins), daemon=True).start()
-    return (n_az, n_el, max_el, n_sp, ins, dest_id, None, False,
+                     args=(dest_id, n_az, n_el, max_el, n_sp, ins, n_tiles), daemon=True).start()
+    return (n_az, n_el, max_el, n_sp, n_tiles, ins, dest_id, None, False,
             "Loading saved simulation…", "Calculate", True, _MODAL_CLOSED)
 
 
@@ -878,56 +918,61 @@ def on_map_click(click_data, current_sel):
         return None
     point = points[0]
     customdata = point.get("customdata")
-    if customdata is None:
+    # Only the per-tile hit-target markers carry customdata (with the tile index
+    # at position 6); clicks on the bare heatmap/borders have none.
+    if customdata is None or len(customdata) < 7:
         return None
-    lat, lon = customdata[0], customdata[1]
-    if current_sel and current_sel["lat"] == lat and current_sel["lon"] == lon:
+    tile = int(customdata[6])
+    if current_sel and current_sel.get("tile") == tile:
         return None
-    return {"lat": lat, "lon": lon}
+    return {"tile": tile}
 
 
 @app.callback(
     Output("traj-view",    "figure",        allow_duplicate=True),
     Output("moon-map",     "figure",        allow_duplicate=True),
     Input("selected-cell", "data"),
+    Input("show-borders",  "value"),
     State("active-dest",   "data"),
     State("n-azimuths",    "value"),
     State("n-elevations",  "value"),
     State("max-elevation", "value"),
     State("n-speeds",      "value"),
     State("insertion-mode", "value"),
+    State("n-tiles",       "value"),
     prevent_initial_call=True,
 )
-def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode):
+def render_selected(sel_cell, show_borders, dest_id, n_az, n_el, max_el, n_sp,
+                    insertion_mode, n_tiles):
     if not dest_id:
         raise dash.exceptions.PreventUpdate
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles)
     with _lock:
         result = _compute_state.get("result")
     if not result or result[6] != cache_key:
         raise dash.exceptions.PreventUpdate
 
-    dv_grid, trajs, az_grid, el_grid, spd_grid, _, _, cell_trajs = result
+    dv, trajs, az, el, spd, _, _, cell_trajs, tiling = result
     dest = ALL_DESTINATIONS[dest_id]
+    borders = bool(show_borders)
 
     if sel_cell is None:
-        moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
-                                  az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid)
+        moon_fig = build_moon_map(tiling, dv, dest.label,
+                                  az=az, el=el, spd=spd, show_borders=borders)
         if trajs:
             return build_trajectory_view(trajs, dest.label, uirevision=cache_key,
                                          target_orbits=dest.target_orbits(),
                                          selected_orbit_ids=_selected_orbit_ids(trajs)), moon_fig
         return build_empty_trajectory_view("No valid trajectories found"), moon_fig
 
-    lat, lon = sel_cell["lat"], sel_cell["lon"]
-    i = int(np.argmin(np.abs(LATS - lat)))
-    j = int(np.argmin(np.abs(LONS - lon)))
-    moon_fig = build_moon_map(LATS, LONS, dv_grid, dest.label,
-                              az_grid=az_grid, el_grid=el_grid, spd_grid=spd_grid,
-                              selected_ij=(i, j))
-    if cell_trajs is not None and cell_trajs[i, j] is not None:
+    k = int(sel_cell["tile"])
+    lat, lon = tiling.centers_latlon[k]
+    moon_fig = build_moon_map(tiling, dv, dest.label,
+                              az=az, el=el, spd=spd,
+                              selected_tile=k, show_borders=borders)
+    if cell_trajs is not None and cell_trajs[k] is not None:
         label = f"{dest.label} — Lat {lat:.0f}°, Lon {lon:.0f}°"
-        cell = [cell_trajs[i, j]]
+        cell = [cell_trajs[k]]
         return build_trajectory_view(cell, label, uirevision=cache_key,
                                      target_orbits=dest.target_orbits(),
                                      selected_orbit_ids=_selected_orbit_ids(cell)), moon_fig
@@ -936,8 +981,7 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
 
 @app.callback(
     Output("traj-view",         "figure",     allow_duplicate=True),
-    Input("center-moon-btn",    "n_clicks"),
-    Input("center-earth-btn",   "n_clicks"),
+    Input({"type": "center-btn", "target": ALL}, "n_clicks"),
     State("active-dest",        "data"),
     State("selected-cell",      "data"),
     State("n-azimuths",         "value"),
@@ -945,16 +989,18 @@ def render_selected(sel_cell, dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
     State("max-elevation",      "value"),
     State("n-speeds",           "value"),
     State("insertion-mode",     "value"),
+    State("n-tiles",            "value"),
     prevent_initial_call=True,
 )
-def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, n_sp, insertion_mode):
+def set_rotation_center(center_clicks, dest_id, sel_cell, n_az, n_el, max_el, n_sp,
+                        insertion_mode, n_tiles):
     from dash import ctx, Patch
-    from physics.cr3bp import MU, DU_KM as _DU_KM
+    from physics.cr3bp import MU, DU_KM as _DU_KM, lagrange_points
 
-    if not dest_id:
+    if not dest_id or not ctx.triggered_id:
         raise dash.exceptions.PreventUpdate
 
-    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode)
+    cache_key = _make_cache_key(dest_id, n_az, n_el, max_el, n_sp, insertion_mode, n_tiles)
     with _lock:
         result = _compute_state.get("result")
     if not result or result[6] != cache_key:
@@ -962,16 +1008,21 @@ def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, 
 
     cx, cy, cz, half = fixed_scene_bounds()
 
-    if ctx.triggered_id == "center-moon-btn":
-        tx = (1 - MU) * _DU_KM
-    else:
-        tx = -MU * _DU_KM
+    # Target point (in km) for each button.
+    targets = {
+        "moon":  ((1 - MU) * _DU_KM, 0.0, 0.0),
+        "earth": (-MU * _DU_KM,      0.0, 0.0),
+    }
+    for px, py, pz, label in lagrange_points():
+        targets[label] = (px * _DU_KM, py * _DU_KM, pz * _DU_KM)
+
+    tx, ty, tz = targets[ctx.triggered_id["target"]]
 
     patched = Patch()
     patched["layout"]["scene"]["camera"]["center"] = {
         "x": (tx - cx) / (2 * half),
-        "y": (0.0 - cy) / (2 * half),
-        "z": (0.0 - cz) / (2 * half),
+        "y": (ty - cy) / (2 * half),
+        "z": (tz - cz) / (2 * half),
     }
     return patched
 
@@ -982,17 +1033,21 @@ def set_rotation_center(moon_n, earth_n, dest_id, sel_cell, n_az, n_el, max_el, 
     Input("n-elevations",  "value"),
     Input("max-elevation", "value"),
     Input("n-speeds",      "value"),
+    Input("n-tiles",       "value"),
     Input("dest-dropdown", "value"),
 )
-def update_param_info(n_az, n_el, max_el, n_sp, dest_id):
+def update_param_info(n_az, n_el, max_el, n_sp, n_tiles, dest_id):
     chip = _CHIP_CLS
     dest_name = ALL_DESTINATIONS[dest_id].label if dest_id else "none"
     _, elevations, _ = _make_sweep_arrays(n_az, n_el, max_el, n_sp)
     actual_n_el = len(elevations)
+    n_tiles = max(MIN_TILES, int(n_tiles)) if n_tiles else DEFAULT_N_TILES
     n_props = int(n_az) * actual_n_el * int(n_sp)
+    total_props = n_tiles * n_props
     return [
         html.Span(f"dest: {dest_name}", className=chip),
-        html.Span(f"grid: {len(LATS)}×{len(LONS)}", className=chip),
+        html.Span(f"{n_tiles} equal-area tiles", className=chip),
         html.Span(f"{int(n_az)} az × {actual_n_el} el × {int(n_sp)} spd", className=chip),
         html.Span(f"{n_props} prop/site", className=chip),
+        html.Span(f"{total_props:,} props total", className=chip),
     ]

@@ -52,36 +52,3 @@ class Destination(ABC):
         Empty list if the destination exposes no displayable orbit.
         """
         return []
-
-    def compute_grid(self, lats, lons, progress_cb=None, n_workers=4):
-        """
-        Compute suitability ΔV grid over (lats × lons).
-
-        Parameters
-        ----------
-        lats : 1-D array (degrees)
-        lons : 1-D array (degrees)
-        progress_cb : callable(fraction) or None
-        n_workers : int, parallel workers
-
-        Returns
-        -------
-        dv_grid : 2-D array (len(lats), len(lons)), ΔV in km/s
-        sample_trajectories : list of trajectory dicts
-        """
-        from concurrent.futures import ProcessPoolExecutor
-        from physics.optimizer import compute_grid
-
-        pairs = [(lat, lon) for lat in lats for lon in lons]
-        total = len(pairs)
-
-        if n_workers > 1:
-            with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                dv_grid, trajs = compute_grid(lats, lons, self, pool=pool)
-        else:
-            dv_grid, trajs = compute_grid(lats, lons, self, pool=None)
-
-        if progress_cb:
-            progress_cb(1.0)
-
-        return dv_grid, trajs

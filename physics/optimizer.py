@@ -142,10 +142,10 @@ def _prop_worker(args):
     return site_idx, el, az, v_du, dv_nd, (traj if np.isfinite(dv_nd) else None), elapsed
 
 
-def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_workers=None,
+def compute_grid(sites, destination, progress_cb=None, site_cb=None, n_workers=None,
                  azimuths=None, elevations=None, speeds_kms=None):
     """
-    Compute suitability grid over all (lat, lon) pairs.
+    Compute post-launch ΔV for every launch site (one equal-area tile centre each).
 
     Submits one task per propagation (N_sites × n_props) to a ProcessPoolExecutor.
     The destination is passed once per worker process via the pool initializer,
@@ -154,7 +154,9 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
 
     Parameters
     ----------
-    lats, lons : 1-D arrays (degrees)
+    sites       : sequence of (lat_deg, lon_deg) tile centres — every site is a
+        distinct physical point (equal-area tilings have no coincident sites, so
+        no polar deduplication is needed).
     destination : Destination instance (must be picklable)
     progress_cb : callable(props_done: int, props_total: int) or None
         Called after every completed propagation.
@@ -167,8 +169,10 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
 
     Returns
     -------
-    dv_grid : 2-D array shape (len(lats), len(lons)), ΔV in km/s
-    best_trajectories : list of representative trajectory dicts
+    dv     : 1-D array (N,), min post-launch ΔV in km/s per tile (inf if unreachable)
+    trajs  : list of representative trajectory dicts (lowest-ΔV first)
+    az, el, spd : 1-D arrays (N,), best launch params per tile (NaN if unreachable)
+    cell_trajs  : object array (N,), best trajectory dict per tile (or None)
     """
     from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
     from concurrent.futures.process import BrokenProcessPool
@@ -184,31 +188,17 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
         # processes exhausts memory before the work is done.
         n_workers = max(1, (os.cpu_count() or 4) // 2)
 
-    pairs = [(lat, lon) for lat in lats for lon in lons]
+    pairs = [(float(lat), float(lon)) for lat, lon in sites]
     n     = len(pairs)
 
-    # Polar deduplication: lat = ±90° is a single physical point regardless of
-    # longitude.  For each polar latitude, compute propagations at only the lon
-    # closest to 0° (the sub-Earth reference) and broadcast the result to all
-    # other lons in that row.  This avoids redundant work while keeping the
-    # rectangular grid shape that the heatmap expects.
-    polar_primary = {}  # lat_value -> site_idx of the primary (computed) site
-    for site_idx, (lat, lon) in enumerate(pairs):
-        if abs(lat) == 90.0:
-            if lat not in polar_primary or abs(lon) < abs(pairs[polar_primary[lat]][1]):
-                polar_primary[lat] = site_idx
-
-    def _is_compute(site_idx, lat):
-        if abs(lat) < 90.0:
-            return True
-        return site_idx == polar_primary.get(lat)
-
-    n_compute   = sum(_is_compute(i, lat) for i, (lat, _) in enumerate(pairs))
+    # Equal-area tilings have no coincident sites, so every tile is a compute
+    # site (no polar deduplication needed).
+    n_compute   = n
     total_props = n_compute * n_props
 
     logger.info(
-        "Starting grid: %d cells (%d compute sites), %d workers, %d props/site (%d total)",
-        n, n_compute, n_workers, n_props, total_props,
+        "Starting grid: %d tiles, %d workers, %d props/site (%d total)",
+        n, n_workers, n_props, total_props,
     )
 
     # Per-site accumulators
@@ -225,8 +215,6 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
     # is consumed — exhausting memory and stalling the run.
     def _task_iter():
         for site_idx, (lat, lon) in enumerate(pairs):
-            if not _is_compute(site_idx, lat):
-                continue
             for el in elevations_use:
                 for az in azimuths_use:
                     for v_du in speeds_du_use:
@@ -360,15 +348,6 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
         finally:
             pool.shutdown(wait=False)               # don't block on dead/recycled workers
 
-    # Broadcast polar primary results to all secondary polar sites.
-    # Secondary sites get the same ΔV (for heatmap colour) but params=None
-    # (no arrow, no trajectory) so only the primary site shows an arrow.
-    for plat, primary_idx in polar_primary.items():
-        dv_pole, _ = site_best[primary_idx]
-        for sec_idx, (slat, _) in enumerate(pairs):
-            if slat == plat and sec_idx != primary_idx:
-                site_best[sec_idx] = (dv_pole, None)
-
     total_elapsed = time.perf_counter() - t0_grid
     dv_flat     = [site_best[i][0] for i in range(n)]
     params_flat = [site_best[i][1] for i in range(n)]
@@ -380,31 +359,28 @@ def compute_grid(lats, lons, destination, progress_cb=None, site_cb=None, n_work
         max(finite_dvs) if finite_dvs else float("nan"),
     )
 
-    dv_grid  = np.array(dv_flat, dtype=float).reshape(len(lats), len(lons))
-    az_flat  = [p["azimuth_deg"]   if p else np.nan for p in params_flat]
-    el_flat  = [p["elevation_deg"] if p else np.nan for p in params_flat]
-    spd_flat = [p["speed_kms"]     if p else np.nan for p in params_flat]
-    az_grid  = np.array(az_flat,  dtype=float).reshape(len(lats), len(lons))
-    el_grid  = np.array(el_flat,  dtype=float).reshape(len(lats), len(lons))
-    spd_grid = np.array(spd_flat, dtype=float).reshape(len(lats), len(lons))
-    trajs    = _pick_representative(lats, lons, dv_grid, params_flat, pairs)
+    # Flat per-tile arrays (length N), indexed identically to `sites`.
+    dv  = np.array(dv_flat, dtype=float)
+    az  = np.array([p["azimuth_deg"]   if p else np.nan for p in params_flat], dtype=float)
+    el  = np.array([p["elevation_deg"] if p else np.nan for p in params_flat], dtype=float)
+    spd = np.array([p["speed_kms"]     if p else np.nan for p in params_flat], dtype=float)
+    trajs = _pick_representative(dv, params_flat)
 
-    cell_trajs = np.empty((len(lats), len(lons)), dtype=object)
+    cell_trajs = np.empty(n, dtype=object)
     for i_site, p in enumerate(params_flat):
-        ri, rj = divmod(i_site, len(lons))
-        cell_trajs[ri, rj] = p["trajectory"] if p is not None else None
+        cell_trajs[i_site] = p["trajectory"] if p is not None else None
 
-    return dv_grid, trajs, az_grid, el_grid, spd_grid, cell_trajs
+    return dv, trajs, az, el, spd, cell_trajs
 
 
-def _pick_representative(lats, lons, dv_grid, params_flat, pairs, n=10):
+def _pick_representative(dv, params_flat, n=10):
     """
-    Select the n sites with the lowest ΔV for the 3-D visualisation.
+    Select the n tiles with the lowest ΔV for the 3-D visualisation.
     Returns a list of trajectory dicts (valid only).
     """
     ranked = sorted(
-        ((dv_grid.flat[i], params_flat[i]) for i, _ in enumerate(pairs)
-         if np.isfinite(dv_grid.flat[i]) and params_flat[i] is not None),
+        ((dv[i], params_flat[i]) for i in range(len(dv))
+         if np.isfinite(dv[i]) and params_flat[i] is not None),
         key=lambda t: t[0],
     )
 

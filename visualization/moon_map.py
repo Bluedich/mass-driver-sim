@@ -2,7 +2,10 @@
 Moon surface suitability map — equirectangular projection.
 
 Shows the Moon satellite photo as background and overlays a semi-transparent
-green-to-red heatmap of post-launch ΔV.
+green-to-red heatmap of post-launch ΔV.  Launch sites are equal-area tiles
+(see physics.tiling); the map rasterizes each pixel to its nearest tile, so
+tiles render as flat-colored regions with no borders unless the border overlay
+is toggled on.
 """
 
 import numpy as np
@@ -10,7 +13,13 @@ import plotly.graph_objects as go
 import base64
 import os
 
+from physics.tiling import latlon_to_xyz, split_antimeridian
+
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
+
+# Raster resolution for the nearest-tile heatmap (equirectangular pixels).
+_RASTER_NLON = 720
+_RASTER_NLAT = 360
 
 
 def _load_image_b64(filename):
@@ -21,12 +30,50 @@ def _load_image_b64(filename):
         return base64.b64encode(f.read()).decode()
 
 
-def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
-                       selected_ij=None):
-    """Add launch-direction arrows for every feasible grid site."""
-    GRID_STEP = 30.0   # degrees — matches GRID_LAT_STEP / GRID_LON_STEP in webapp.py
-    MAX_HALF  = GRID_STEP * 0.40   # 12° — arrow length at 0° elevation
-    MIN_HALF  = GRID_STEP * 0.10   #  3° — arrow length at 90° elevation
+def _rasterize(tiling, dv):
+    """Nearest-tile ΔV raster over an equirectangular pixel grid.
+
+    Returns (x_disp, y_lat, z) for a go.Heatmap: each pixel takes the ΔV of the
+    tile whose centre is nearest (great-circle) — flat-colored regions, no edges.
+    Unreachable tiles map to NaN (transparent).
+    """
+    lon = np.linspace(-180.0, 180.0, _RASTER_NLON)
+    lat = np.linspace(-90.0, 90.0, _RASTER_NLAT)
+    LO, LA = np.meshgrid(lon, lat)
+    xyz = latlon_to_xyz(LA.ravel(), LO.ravel())
+    idx = tiling.nearest_index(xyz)
+    z = np.asarray(dv, dtype=float)[idx].reshape(_RASTER_NLAT, _RASTER_NLON)
+    z = np.where(np.isfinite(z), z, np.nan)
+    # x = −lon so east renders on the left, matching the photo convention.
+    return -lon, lat, z
+
+
+def _add_borders(fig, tiling):
+    """Overlay the Voronoi cell edges as thin grey lines (dateline-split)."""
+    xs, ys = [], []
+    for ring in tiling.polygons_latlon:
+        blat, blon = split_antimeridian(ring[:, 0], ring[:, 1])
+        xs.extend((-blon).tolist())
+        ys.extend(blat.tolist())
+        xs.append(None)
+        ys.append(None)
+    if not xs:
+        return
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="lines",
+        line=dict(color="rgba(255,255,255,0.35)", width=0.8),
+        hoverinfo="skip", showlegend=False,
+    ))
+
+
+def _add_arrow_overlay(fig, tiling, dv, az, el, spd, selected_tile=None):
+    """Add launch-direction arrows + click/hover hit-targets, one per feasible tile."""
+    n = tiling.n
+    # Arrow length scales with the characteristic tile spacing (≈√(41253/N)°),
+    # so arrows stay proportional to cell size as density changes.
+    spacing = float(np.sqrt(41253.0 / max(1, n)))
+    MAX_HALF = spacing * 0.45   # arrow half-length at 0° elevation
+    MIN_HALF = spacing * 0.12   # arrow half-length at 90° elevation
 
     norm_shaft_x, norm_shaft_y = [], []
     norm_tip_x,   norm_tip_y,   norm_tip_az = [], [], []
@@ -35,41 +82,40 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
     mid_x,        mid_y        = [], []
     customdata                 = []
 
-    for i, lat in enumerate(lats):
-        for j, lon in enumerate(lons):
-            dv  = dv_grid[i, j]
-            az  = az_grid[i, j]
-            el  = el_grid[i, j]
-            spd = spd_grid[i, j] if spd_grid is not None else np.nan
-            if not (np.isfinite(dv) and np.isfinite(az) and np.isfinite(el)):
-                continue
+    for k in range(n):
+        lat, lon = tiling.centers_latlon[k]
+        dvk  = dv[k]
+        azk  = az[k]
+        elk  = el[k]
+        spdk = spd[k] if spd is not None else np.nan
+        if not (np.isfinite(dvk) and np.isfinite(azk) and np.isfinite(elk)):
+            continue
 
-            half   = MIN_HALF + (MAX_HALF - MIN_HALF) * (1.0 - el / 90.0)
-            az_rad = np.deg2rad(az)
-            dx     = half * np.sin(az_rad)   # east (+lon)
-            dy     = half * np.cos(az_rad)   # north (+lat)
+        half   = MIN_HALF + (MAX_HALF - MIN_HALF) * (1.0 - elk / 90.0)
+        az_rad = np.deg2rad(azk)
+        dx     = half * np.sin(az_rad)   # east (+lon)
+        dy     = half * np.cos(az_rad)   # north (+lat)
 
-            # Display uses x = −lon so east appears on the left (matching the image)
-            xc = -lon   # display x of this cell centre
-            az_disp = (360 - az) % 360  # mirror azimuth for the flipped x-axis
+        xc = -lon   # display x (east on the left)
+        az_disp = (360 - azk) % 360      # mirror azimuth for the flipped x-axis
 
-            is_sel = selected_ij is not None and selected_ij == (i, j)
-            if is_sel:
-                sel_shaft_x += [xc + dx, xc - dx, None]
-                sel_shaft_y += [lat - dy, lat + dy, None]
-                sel_tip_x.append(xc - dx)
-                sel_tip_y.append(lat + dy)
-                sel_tip_az.append(az_disp)
-            else:
-                norm_shaft_x += [xc + dx, xc - dx, None]
-                norm_shaft_y += [lat - dy, lat + dy, None]
-                norm_tip_x.append(xc - dx)
-                norm_tip_y.append(lat + dy)
-                norm_tip_az.append(az_disp)
+        is_sel = selected_tile is not None and selected_tile == k
+        if is_sel:
+            sel_shaft_x += [xc + dx, xc - dx, None]
+            sel_shaft_y += [lat - dy, lat + dy, None]
+            sel_tip_x.append(xc - dx)
+            sel_tip_y.append(lat + dy)
+            sel_tip_az.append(az_disp)
+        else:
+            norm_shaft_x += [xc + dx, xc - dx, None]
+            norm_shaft_y += [lat - dy, lat + dy, None]
+            norm_tip_x.append(xc - dx)
+            norm_tip_y.append(lat + dy)
+            norm_tip_az.append(az_disp)
 
-            mid_x.append(xc)
-            mid_y.append(lat)
-            customdata.append([lat, lon, az, el, spd, dv])
+        mid_x.append(xc)
+        mid_y.append(lat)
+        customdata.append([lat, lon, azk, elk, spdk, dvk, k])
 
     if not mid_x:
         return
@@ -120,14 +166,15 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
             showlegend=False,
         ))
 
-    # Invisible hit-targets for hover/click (all cells)
+    # Invisible hit-targets for hover/click (one per feasible tile).
+    # customdata[6] carries the tile index, used by the click callback.
     fig.add_trace(go.Scatter(
         x=mid_x, y=mid_y,
         mode="markers",
-        marker=dict(size=18, opacity=0, color="white"),
+        marker=dict(size=16, opacity=0, color="white"),
         customdata=customdata,
         hovertemplate=(
-            "<b>Lat %{customdata[0]:.0f}°, Lon %{customdata[1]:.0f}°</b><br>"
+            "<b>Lat %{customdata[0]:.1f}°, Lon %{customdata[1]:.1f}°</b><br>"
             "Azimuth: %{customdata[2]:.1f}° (CW from N)<br>"
             "Elevation: %{customdata[3]:.1f}°<br>"
             "Launch speed: %{customdata[4]:.2f} km/s<br>"
@@ -138,17 +185,19 @@ def _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
     ))
 
 
-def build_moon_map(lats, lons, dv_grid, destination_label="",
-                   az_grid=None, el_grid=None, spd_grid=None, selected_ij=None):
+def build_moon_map(tiling, dv, destination_label="",
+                   az=None, el=None, spd=None, selected_tile=None,
+                   show_borders=False):
     """
-    Build a Plotly figure: equirectangular Moon map with ΔV heatmap overlay.
+    Build a Plotly figure: equirectangular Moon map with an equal-area ΔV heatmap.
 
     Parameters
     ----------
-    lats : 1-D array of latitudes (degrees, -90 to 90)
-    lons : 1-D array of longitudes (degrees, -180 to 180)
-    dv_grid : 2-D array shape (len(lats), len(lons)), ΔV in km/s
-    destination_label : str
+    tiling : physics.tiling.Tiling — the equal-area launch-site tiling
+    dv  : 1-D array (N,), post-launch ΔV in km/s per tile (inf → transparent)
+    az, el, spd : 1-D arrays (N,), best launch params per tile (for arrows/hover)
+    selected_tile : int or None — tile to highlight in gold
+    show_borders : bool — overlay the Voronoi cell edges when True
 
     Returns
     -------
@@ -171,9 +220,8 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
             )
         )
 
-    # ── ΔV heatmap overlay ────────────────────────────────────────────────────
-    # Replace inf with NaN so Plotly renders them transparent
-    dv_plot = np.where(np.isfinite(dv_grid), dv_grid, np.nan)
+    # ── ΔV heatmap overlay (nearest-tile raster) ──────────────────────────────
+    x_disp, y_lat, z = _rasterize(tiling, dv)
 
     # Custom green→yellow→red colorscale
     colorscale = [
@@ -184,32 +232,28 @@ def build_moon_map(lats, lons, dv_grid, destination_label="",
         [1.0, "rgb(200,0,0)"],
     ]
 
-    # x = −lon so east is on the left, matching the image convention.
-    # Store physical lon in `text` so hover shows the real selenographic value.
-    hover_text = np.array([[f"{lons[j]:.1f}°" for j in range(len(lons))]
-                           for _ in range(len(lats))])
-
+    finite = np.any(np.isfinite(z))
     fig.add_trace(go.Heatmap(
-        x=-lons,
-        y=lats,
-        z=dv_plot,
-        text=hover_text,
+        x=x_disp,
+        y=y_lat,
+        z=z,
         colorscale=colorscale,
         opacity=0.65,
-        zmin=np.nanpercentile(dv_plot, 2)  if np.any(np.isfinite(dv_plot)) else 0,
-        zmax=np.nanpercentile(dv_plot, 98) if np.any(np.isfinite(dv_plot)) else 5,
+        zmin=np.nanpercentile(z, 2)  if finite else 0,
+        zmax=np.nanpercentile(z, 98) if finite else 5,
         colorbar=dict(
             title=dict(text="Post-launch ΔV (km/s)", side="right"),
             thickness=14,
             len=0.8,
         ),
-        hoverongaps=False,
-        hovertemplate="Lon: %{text}<br>Lat: %{y:.1f}°<br>ΔV: %{z:.2f} km/s<extra></extra>",
+        hoverinfo="skip",
     ))
 
-    if az_grid is not None and el_grid is not None:
-        _add_arrow_overlay(fig, lats, lons, dv_grid, az_grid, el_grid, spd_grid,
-                           selected_ij=selected_ij)
+    if show_borders:
+        _add_borders(fig, tiling)
+
+    if az is not None and el is not None:
+        _add_arrow_overlay(fig, tiling, dv, az, el, spd, selected_tile=selected_tile)
 
     fig.update_layout(
         title=dict(text=f"Launch suitability — {destination_label}", x=0.5,
